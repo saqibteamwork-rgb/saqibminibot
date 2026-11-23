@@ -436,24 +436,34 @@ async function initWhatsApp(pairingNumber = null) {
                 }
 
                 try {
-                    const from = msg.key.remoteJid;
+                    let from = msg.key?.remoteJid;
+                    if (!from || from === 'status@broadcast') {
+                        if (msg.message?.deviceSentMessage?.destinationJid) {
+                            from = msg.message.deviceSentMessage.destinationJid;
+                        }
+                    }
                     const botJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+                    if (!from || from === 'status@broadcast') {
+                        from = botJid;
+                    }
+                    if (!from) continue;
+
                     const targetJid = from ? jidNormalizedUser(from) : null;
                     const isSelfChat = Boolean(botJid && targetJid && botJid === targetJid);
-                    const isMe = Boolean(msg.key.fromMe || isSelfChat);
+                    const isGroup = from && from.endsWith('@g.us');
+                    // In self-chat or 1-on-1 private chat, NEVER quote to eliminate E2EE loopback decryption stalls!
+                    const quoteOpt = isGroup ? { quoted: msg } : {};
                     const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
-                    // Safe quote: in self-chat ("Message yourself"), quoting yourself causes WhatsApp E2EE loopback decryption stalls
-                    const safeQuote = isMe ? {} : { quoted: msg };
 
                     // Deep unwrap containers (ephemeral, viewOnce, deviceSentMessage)
                     let content = msg.message;
-                    while (
+                    while (content && (
                         content.ephemeralMessage ||
                         content.viewOnceMessage ||
                         content.viewOnceMessageV2 ||
                         content.deviceSentMessage ||
                         content.documentWithCaptionMessage
-                    ) {
+                    )) {
                         content =
                             content.ephemeralMessage?.message ||
                             content.viewOnceMessage?.message ||
@@ -462,6 +472,8 @@ async function initWhatsApp(pairingNumber = null) {
                             content.documentWithCaptionMessage?.message ||
                             content;
                     }
+
+                    if (!content) continue;
 
                     const quotedMsg =
                         content.extendedTextMessage?.contextInfo?.quotedMessage ||
@@ -476,6 +488,7 @@ async function initWhatsApp(pairingNumber = null) {
                         content.extendedTextMessage?.text ||
                         content.imageMessage?.caption ||
                         content.videoMessage?.caption ||
+                        content.documentMessage?.caption ||
                         ''
                     ).trim();
 
@@ -512,7 +525,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `⏳ *Uptime:* ${uptimeStr}\n` +
                                       `🚀 *Engine:* 24/7 Zero-Sleep Public Mesh\n` +
                                       `🛡️ *Status:* 🟢 Connected & Healthy`
-                            }, safeQuote);
+                            }, quoteOpt);
                             break;
                         }
 
@@ -533,7 +546,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `• *.echo <text>* — Test message echo response\n` +
                                       `• *.status* — Server health & uptime details\n\n` +
                                       `_⚡ Running ultra-fast on Heroku Zero-Sleep Engine!_`
-                            }, safeQuote);
+                            }, quoteOpt);
                             break;
                         }
 
@@ -544,7 +557,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `Server has been running continuously for:\n` +
                                       `👉 *${formatUptime(Math.floor((Date.now() - BOOT_TIME) / 1000))}*\n\n` +
                                       `Heroku idle sleep is permanently bypassed using automatic 25s self-pings!`
-                            }, safeQuote);
+                            }, quoteOpt);
                             break;
                         }
 
@@ -563,7 +576,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `• *V8 Heap Total:* ${heapTotalMb} MB\n` +
                                       `• *Free RAM Headroom:* ${freeBudget} MB\n` +
                                       `• *OOM Risk Level:* 🟢 ZERO (Well below 512MB limit)`
-                            }, safeQuote);
+                            }, quoteOpt);
                             break;
                         }
 
@@ -573,16 +586,16 @@ async function initWhatsApp(pairingNumber = null) {
                                       `• *Name:* ${OWNER_NAME}\n` +
                                       `• *Number:* wa.me/${OWNER_NUMBER}\n` +
                                       `• *Bot:* ${BOT_NAME}`
-                            }, safeQuote);
+                            }, quoteOpt);
                             break;
                         }
 
                         case 'echo': {
                             if (!fullArgs) {
-                                await sock.sendMessage(from, { text: `⚠️ Usage: *.echo Hello World*` }, safeQuote);
+                                await sock.sendMessage(from, { text: `⚠️ Usage: *.echo Hello World*` }, quoteOpt);
                                 break;
                             }
-                            await sock.sendMessage(from, { text: `🗣️ *Echo:* ${fullArgs}` }, safeQuote);
+                            await sock.sendMessage(from, { text: `🗣️ *Echo:* ${fullArgs}` }, quoteOpt);
                             break;
                         }
 
@@ -716,7 +729,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `📊 *Type:* ${typeStr}\n` +
                                       `📋 *Channels:* ${channelNames.slice(0, 5).join(', ')}${channelNames.length > 5 ? ` (+${channelNames.length - 5} more)` : ''}\n\n` +
                                       `_⚡ Powered by ${BOT_NAME}_`
-                            }, safeQuote);
+                            }, quoteOpt);
                             break;
                         }
                     }

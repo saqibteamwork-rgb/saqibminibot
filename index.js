@@ -49,6 +49,9 @@ let saveCredsCallback = null;
 let mongoDb = null;
 let mongoClient = null;
 
+// In-Memory message store for instant Baileys retry resolution (Eliminates "Waiting for this message")
+const messageStore = new Map();
+
 // Ensure session directory exists
 fs.ensureDirSync(SESSION_DIR);
 
@@ -187,12 +190,18 @@ async function initWhatsApp(pairingNumber = null) {
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
             browser: Browsers.ubuntu('Chrome'),
+            syncFullHistory: false,
             markOnlineOnConnect: true,
             keepAliveIntervalMs: 15000,
             connectTimeoutMs: 30000,
             defaultQueryTimeoutMs: 25000,
             emitOwnEvents: true,
-            getMessage: async () => undefined
+            getMessage: async (key) => {
+                if (key?.id && messageStore.has(key.id)) {
+                    return messageStore.get(key.id);
+                }
+                return undefined;
+            }
         });
 
         // 1. Save credentials on update
@@ -267,16 +276,39 @@ async function initWhatsApp(pairingNumber = null) {
             for (const msg of messages) {
                 if (!msg?.message || msg.key?.remoteJid?.endsWith('@newsletter')) continue;
 
+                // Cache message in memory for instant Signal ratchet retry responses
+                if (msg.key?.id && msg.message) {
+                    messageStore.set(msg.key.id, msg.message);
+                    if (messageStore.size > 1000) {
+                        const oldestKey = messageStore.keys().next().value;
+                        messageStore.delete(oldestKey);
+                    }
+                }
+
                 try {
                     const from = msg.key.remoteJid;
                     const isMe = Boolean(msg.key.fromMe);
                     const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
+                    // Safe quote: in self-chat ("Message yourself"), quoting yourself causes WhatsApp E2EE loopback decryption stalls
+                    const safeQuote = isMe ? {} : { quoted: msg };
 
-                    // Deep unwrap containers (ephemeral, viewOnce)
+                    // Deep unwrap containers (ephemeral, viewOnce, deviceSentMessage)
                     let content = msg.message;
-                    if (content.ephemeralMessage?.message) content = content.ephemeralMessage.message;
-                    if (content.viewOnceMessage?.message) content = content.viewOnceMessage.message;
-                    if (content.viewOnceMessageV2?.message) content = content.viewOnceMessageV2.message;
+                    while (
+                        content.ephemeralMessage ||
+                        content.viewOnceMessage ||
+                        content.viewOnceMessageV2 ||
+                        content.deviceSentMessage ||
+                        content.documentWithCaptionMessage
+                    ) {
+                        content =
+                            content.ephemeralMessage?.message ||
+                            content.viewOnceMessage?.message ||
+                            content.viewOnceMessageV2?.message ||
+                            content.deviceSentMessage?.message ||
+                            content.documentWithCaptionMessage?.message ||
+                            content;
+                    }
 
                     const rawText = (
                         content.conversation ||
@@ -319,7 +351,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `⏳ *Uptime:* ${uptimeStr}\n` +
                                       `🚀 *Engine:* 24/7 Zero-Sleep Public Mesh\n` +
                                       `🛡️ *Status:* 🟢 Connected & Healthy`
-                            }, { quoted: msg });
+                            }, safeQuote);
                             break;
                         }
 
@@ -339,7 +371,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `• *.echo <text>* — Test message echo response\n` +
                                       `• *.status* — Server health & uptime details\n\n` +
                                       `_⚡ Running ultra-fast on Heroku Zero-Sleep Engine!_`
-                            }, { quoted: msg });
+                            }, safeQuote);
                             break;
                         }
 
@@ -350,7 +382,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `Server has been running continuously for:\n` +
                                       `👉 *${formatUptime(Math.floor((Date.now() - BOOT_TIME) / 1000))}*\n\n` +
                                       `Heroku idle sleep is permanently bypassed using automatic 25s self-pings!`
-                            }, { quoted: msg });
+                            }, safeQuote);
                             break;
                         }
 
@@ -369,7 +401,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `• *V8 Heap Total:* ${heapTotalMb} MB\n` +
                                       `• *Free RAM Headroom:* ${freeBudget} MB\n` +
                                       `• *OOM Risk Level:* 🟢 ZERO (Well below 512MB limit)`
-                            }, { quoted: msg });
+                            }, safeQuote);
                             break;
                         }
 
@@ -379,16 +411,16 @@ async function initWhatsApp(pairingNumber = null) {
                                       `• *Name:* ${OWNER_NAME}\n` +
                                       `• *Number:* wa.me/${OWNER_NUMBER}\n` +
                                       `• *Bot:* ${BOT_NAME}`
-                            }, { quoted: msg });
+                            }, safeQuote);
                             break;
                         }
 
                         case 'echo': {
                             if (!fullArgs) {
-                                await sock.sendMessage(from, { text: `⚠️ Usage: *.echo Hello World*` }, { quoted: msg });
+                                await sock.sendMessage(from, { text: `⚠️ Usage: *.echo Hello World*` }, safeQuote);
                                 break;
                             }
-                            await sock.sendMessage(from, { text: `🗣️ *Echo:* ${fullArgs}` }, { quoted: msg });
+                            await sock.sendMessage(from, { text: `🗣️ *Echo:* ${fullArgs}` }, safeQuote);
                             break;
                         }
                     }

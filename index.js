@@ -314,6 +314,32 @@ async function initWhatsApp(pairingNumber = null) {
             }
         });
 
+        // Global Safe-Send wrapper: protects against WhatsApp Companion loopback decryption delay & caches for retries
+        const rawSendMessage = sock.sendMessage.bind(sock);
+        sock.sendMessage = async (jid, content, options = {}) => {
+            const botJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+            const targetJid = jid ? jidNormalizedUser(jid) : null;
+            const isSelfChat = Boolean(botJid && targetJid && botJid === targetJid);
+
+            if (options && options.quoted) {
+                const qKey = options.quoted.key;
+                if (qKey?.fromMe || isSelfChat) {
+                    options = { ...options };
+                    delete options.quoted;
+                }
+            }
+
+            const sentMsg = await rawSendMessage(jid, content, options);
+            if (sentMsg?.key?.id && sentMsg.message) {
+                messageStore.set(sentMsg.key.id, sentMsg.message);
+                if (messageStore.size > 1000) {
+                    const oldestKey = messageStore.keys().next().value;
+                    messageStore.delete(oldestKey);
+                }
+            }
+            return sentMsg;
+        };
+
         // 1. Save credentials on update
         sock.ev.on('creds.update', async () => {
             try {
@@ -395,9 +421,26 @@ async function initWhatsApp(pairingNumber = null) {
                     }
                 }
 
+                // Check for decryption errors & auto-reset corrupted ratchet key for this sender
+                if (msg.messageStubType === 1 || msg.messageStubType === 2) {
+                    console.warn(`⚠️ Received undecryptable message (Stub ${msg.messageStubType}). Auto-healing session...`);
+                    const senderKey = msg.key?.participant || msg.key?.remoteJid;
+                    if (senderKey && !senderKey.endsWith('@newsletter')) {
+                        try {
+                            const sFile = path.join(SESSION_DIR, `session-${senderKey.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
+                            if (fs.existsSync(sFile)) {
+                                fs.unlinkSync(sFile);
+                            }
+                        } catch (_) {}
+                    }
+                }
+
                 try {
                     const from = msg.key.remoteJid;
-                    const isMe = Boolean(msg.key.fromMe);
+                    const botJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+                    const targetJid = from ? jidNormalizedUser(from) : null;
+                    const isSelfChat = Boolean(botJid && targetJid && botJid === targetJid);
+                    const isMe = Boolean(msg.key.fromMe || isSelfChat);
                     const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
                     // Safe quote: in self-chat ("Message yourself"), quoting yourself causes WhatsApp E2EE loopback decryption stalls
                     const safeQuote = isMe ? {} : { quoted: msg };

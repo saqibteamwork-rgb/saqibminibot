@@ -1,0 +1,30 @@
+{
+  "name": "mini-bot-heroku",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight 24/7 Zero-Sleep WhatsApp MD Bot for Heroku with Pairing Code & Keepalive",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "heroku",
+    "zero-sleep",
+    "mini-bot"
+  ],
+  "author": "MR SAQIB",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.19",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.0",
+    "mongodb": "^6.12.0",
+    "pino": "^9.6.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

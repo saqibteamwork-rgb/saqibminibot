@@ -29,6 +29,7 @@ const {
     makeCacheableSignalKeyStore,
     Browsers,
     jidNormalizedUser,
+    downloadContentFromMessage,
     delay
 } = require('@whiskeysockets/baileys');
 
@@ -156,6 +157,115 @@ function backupSessionToCloud() {
             console.warn('⚠️ [Session Backup Error]:', e.message);
         }
     }, 2500);
+}
+
+// ═════════════════════════════════════════════════════════════
+// 1.5. CHANNEL & MEDIA HELPERS (.cforward ENGINE)
+// ═════════════════════════════════════════════════════════════
+
+async function extractQuotedMedia(quotedMsg) {
+    if (!quotedMsg) return null;
+    let content = quotedMsg;
+    while (content.ephemeralMessage || content.viewOnceMessage || content.viewOnceMessageV2 || content.documentWithCaptionMessage) {
+        content = content.ephemeralMessage?.message || content.viewOnceMessage?.message || content.viewOnceMessageV2?.message || content.documentWithCaptionMessage?.message || content;
+    }
+    const type = Object.keys(content)[0];
+    const raw = content[type];
+    if (!raw) return null;
+
+    let mediaType = null;
+    if (type === 'imageMessage') mediaType = 'image';
+    else if (type === 'videoMessage') mediaType = 'video';
+    else if (type === 'audioMessage') mediaType = 'audio';
+    else if (type === 'documentMessage') mediaType = 'document';
+    else if (type === 'stickerMessage') mediaType = 'sticker';
+
+    if (!mediaType) return null;
+
+    try {
+        const stream = await downloadContentFromMessage(raw, mediaType);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+        return {
+            buffer,
+            mediaType,
+            type,
+            mimetype: raw.mimetype,
+            caption: raw.caption || '',
+            fileName: raw.fileName || 'file'
+        };
+    } catch (e) {
+        console.error('[extractQuotedMedia error]:', e.message);
+        return null;
+    }
+}
+
+async function resolveChannelTarget(targetStr) {
+    if (!targetStr || !sock) return null;
+    const clean = targetStr.trim();
+
+    // Invite link: https://whatsapp.com/channel/CODE
+    const linkMatch = clean.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
+    if (linkMatch) {
+        const code = linkMatch[1];
+        try {
+            const meta = await sock.newsletterMetadata('invite', code);
+            if (meta?.id) {
+                return {
+                    jid: meta.id,
+                    name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel'
+                };
+            }
+        } catch (e) {
+            console.error('[resolveChannelTarget invite error]:', e.message);
+        }
+    }
+
+    // Direct JID: 120363xxx@newsletter
+    if (clean.endsWith('@newsletter')) {
+        let name = 'WhatsApp Channel';
+        try {
+            const meta = await sock.newsletterMetadata('jid', clean);
+            name = meta?.thread_metadata?.name?.text || meta?.name || name;
+        } catch (_) {}
+        return { jid: clean, name };
+    }
+
+    // Numeric ID
+    if (/^\d{10,}$/.test(clean)) {
+        const jid = `${clean}@newsletter`;
+        return { jid, name: 'WhatsApp Channel' };
+    }
+
+    return null;
+}
+
+async function getAdminChannels() {
+    if (!sock) return [];
+    try {
+        const res = await sock.query({
+            tag: 'iq',
+            attrs: { id: sock.generateMessageTag(), type: 'get', to: 's.whatsapp.net', xmlns: 'w:mex' },
+            content: [{ tag: 'query', attrs: { query_id: '6388546374527196' }, content: Buffer.from(JSON.stringify({ variables: {} }), 'utf-8') }]
+        });
+        const child = Array.isArray(res?.content) ? res.content.find((c) => c?.tag === 'result') : null;
+        if (child?.content) {
+            const data = JSON.parse(Buffer.from(child.content).toString('utf8'));
+            const list = data?.data?.xwa2_newsletter_subscribed || [];
+            return list
+                .filter(item => {
+                    const role = item?.viewer_metadata?.role;
+                    return role === 'ADMIN' || role === 'OWNER';
+                })
+                .map(item => ({
+                    jid: item.id,
+                    name: item.thread_metadata?.name?.text || item.name || item.id
+                }));
+        }
+    } catch (e) {
+        console.warn('[getAdminChannels error]:', e.message);
+    }
+    return [];
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -310,6 +420,14 @@ async function initWhatsApp(pairingNumber = null) {
                             content;
                     }
 
+                    const quotedMsg =
+                        content.extendedTextMessage?.contextInfo?.quotedMessage ||
+                        content.imageMessage?.contextInfo?.quotedMessage ||
+                        content.videoMessage?.contextInfo?.quotedMessage ||
+                        content.documentMessage?.contextInfo?.quotedMessage ||
+                        content.audioMessage?.contextInfo?.quotedMessage ||
+                        null;
+
                     const rawText = (
                         content.conversation ||
                         content.extendedTextMessage?.text ||
@@ -331,7 +449,7 @@ async function initWhatsApp(pairingNumber = null) {
                     const fullArgs = (cmdMatch[3] || '').trim();
 
                     // Only react to known commands or prefixed commands
-                    const validCommands = ['ping', 'menu', 'help', 'alive', 'ram', 'memory', 'speed', 'owner', 'echo', 'status'];
+                    const validCommands = ['ping', 'menu', 'help', 'alive', 'ram', 'memory', 'speed', 'owner', 'echo', 'status', 'cforward', 'chforward', 'cforwrd', 'chfwd'];
                     if (!prefix && !validCommands.includes(command)) continue;
 
                     console.log(`📩 [CMD] Received ".${command}" from ${from}`);
@@ -365,6 +483,7 @@ async function initWhatsApp(pairingNumber = null) {
                                       `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                                       `📌 *AVAILABLE COMMANDS:*\n` +
                                       `• *.ping* — Check bot speed & response latency\n` +
+                                      `• *.cforward* — Forward post, media or text to WhatsApp Channels\n` +
                                       `• *.alive* — Verify 24/7 online status\n` +
                                       `• *.ram* — Real-time Heroku RAM usage stats\n` +
                                       `• *.owner* — Bot developer contact info\n` +
@@ -421,6 +540,140 @@ async function initWhatsApp(pairingNumber = null) {
                                 break;
                             }
                             await sock.sendMessage(from, { text: `🗣️ *Echo:* ${fullArgs}` }, safeQuote);
+                            break;
+                        }
+
+                        case 'cforward':
+                        case 'chforward':
+                        case 'cforwrd':
+                        case 'chfwd': {
+                            // 1. Identify destination channel(s) and custom announcement text
+                            let targetChannel = null;
+                            let customText = '';
+
+                            if (args.length > 0) {
+                                const possibleChannel = await resolveChannelTarget(args[0]);
+                                if (possibleChannel) {
+                                    targetChannel = possibleChannel;
+                                    customText = args.slice(1).join(' ').trim();
+                                } else {
+                                    for (let i = 0; i < args.length; i++) {
+                                        const found = await resolveChannelTarget(args[i]);
+                                        if (found) {
+                                            targetChannel = found;
+                                            customText = args.filter((_, idx) => idx !== i).join(' ').trim();
+                                            break;
+                                        }
+                                    }
+                                    if (!targetChannel) {
+                                        customText = fullArgs;
+                                    }
+                                }
+                            }
+
+                            // 2. Identify message content to forward (Quoted message or media)
+                            let mediaPayload = null;
+                            let textPayload = '';
+
+                            if (quotedMsg) {
+                                mediaPayload = await extractQuotedMedia(quotedMsg);
+                                if (!mediaPayload) {
+                                    textPayload =
+                                        quotedMsg.conversation ||
+                                        quotedMsg.extendedTextMessage?.text ||
+                                        quotedMsg.imageMessage?.caption ||
+                                        quotedMsg.videoMessage?.caption ||
+                                        quotedMsg.documentMessage?.caption ||
+                                        '';
+                                }
+                            }
+
+                            // If user typed custom text with .cforward, apply it
+                            if (customText) {
+                                if (mediaPayload) {
+                                    mediaPayload.caption = customText;
+                                } else if (!quotedMsg) {
+                                    textPayload = customText;
+                                }
+                            }
+
+                            // 3. Resolve destination channels list
+                            let destinations = [];
+                            if (targetChannel) {
+                                destinations.push(targetChannel);
+                            } else {
+                                const myChannels = await getAdminChannels();
+                                if (myChannels.length > 0) {
+                                    destinations = myChannels;
+                                }
+                            }
+
+                            if (destinations.length === 0) {
+                                await sock.sendMessage(from, {
+                                    text: `📢 *HOW TO USE .CFORWARD:*\n\n` +
+                                          `1️⃣ *Forward to Channel by Link / ID:*\n` +
+                                          `Reply to any post or media with:\n` +
+                                          `👉 *.cforward https://whatsapp.com/channel/CODE*\n` +
+                                          `👉 *.cforward 120363xxx@newsletter*\n\n` +
+                                          `2️⃣ *Direct Announcement to Channel:*\n` +
+                                          `👉 *.cforward <channel-link> Your message text*\n\n` +
+                                          `3️⃣ *Forward to All Your Admin Channels:*\n` +
+                                          `Reply to any message with:\n` +
+                                          `👉 *.cforward*\n\n` +
+                                          `⚠️ _Koi Admin Channel detect nahi hua. Direct link ya ID de kar bhejein!_`
+                                }, safeQuote);
+                                break;
+                            }
+
+                            if (!mediaPayload && !textPayload) {
+                                await sock.sendMessage(from, {
+                                    text: `⚠️ *Kisi message/media par reply karein ya text likhein!*\n\n` +
+                                          `Example: *.cforward https://whatsapp.com/channel/CODE Hello Friends!*`
+                                }, safeQuote);
+                                break;
+                            }
+
+                            // 4. Send to all destination channels
+                            let successCount = 0;
+                            let failCount = 0;
+                            const channelNames = [];
+
+                            for (const dest of destinations) {
+                                try {
+                                    if (mediaPayload) {
+                                        if (mediaPayload.mediaType === 'image') {
+                                            await sock.sendMessage(dest.jid, { image: mediaPayload.buffer, caption: mediaPayload.caption });
+                                        } else if (mediaPayload.mediaType === 'video') {
+                                            await sock.sendMessage(dest.jid, { video: mediaPayload.buffer, caption: mediaPayload.caption });
+                                        } else if (mediaPayload.mediaType === 'audio') {
+                                            await sock.sendMessage(dest.jid, { audio: mediaPayload.buffer, mimetype: mediaPayload.mimetype || 'audio/mp4' });
+                                        } else if (mediaPayload.mediaType === 'document') {
+                                            await sock.sendMessage(dest.jid, { document: mediaPayload.buffer, mimetype: mediaPayload.mimetype, fileName: mediaPayload.fileName });
+                                        } else if (mediaPayload.mediaType === 'sticker') {
+                                            await sock.sendMessage(dest.jid, { sticker: mediaPayload.buffer });
+                                        }
+                                    } else if (textPayload) {
+                                        await sock.sendMessage(dest.jid, { text: textPayload });
+                                    }
+                                    successCount++;
+                                    channelNames.push(dest.name);
+                                    await delay(1200);
+                                } catch (sendErr) {
+                                    console.error(`[cforward failed for ${dest.jid}]:`, sendErr.message);
+                                    failCount++;
+                                }
+                            }
+
+                            // 5. Send report back
+                            const typeStr = mediaPayload ? mediaPayload.mediaType.toUpperCase() : 'TEXT';
+                            await sock.sendMessage(from, {
+                                text: `📢 *CFORWARD SUMMARY*\n\n` +
+                                      `✅ *Sent:* ${successCount} channel(s)\n` +
+                                      (failCount > 0 ? `❌ *Failed:* ${failCount}\n` : '') +
+                                      `📊 *Type:* ${typeStr}\n` +
+                                      `📋 *Channels:* ${channelNames.slice(0, 5).join(', ')}${channelNames.length > 5 ? ` (+${channelNames.length - 5} more)` : ''}\n\n` +
+                                      `_⚡ Powered by ${BOT_NAME}_`
+                            }, safeQuote);
                             break;
                         }
                     }

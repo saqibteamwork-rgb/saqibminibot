@@ -1,8 +1,12 @@
 {
   "name": "mini-bot-zero-sleep",
-  "description": "Ultra-lightweight 24/7 Zero-Sleep WhatsApp MD Bot for Heroku with Pairing Code & Keepalive",
+  "description": "Ultra-lightweight 24/7 Zero-Sleep WhatsApp MD Bot for Heroku with 120+ Commands, Pairing Code & Keepalive",
   "keywords": ["whatsapp", "baileys", "heroku", "mini-bot"],
-  "stack": "container",
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
   "env": {
     "APP_URL": {
       "description": "Public URL of this Heroku app (e.g. https://your-app-name.herokuapp.com) for 24/7 self-ping keepalive",
@@ -10,8 +14,7 @@
     },
     "MONGODB_URI": {
       "description": "MongoDB Atlas connection string for persistent session backup across dyno restarts (optional)",
-      "required": false,
-      "value": "mongodb+srv://ayeshasaqibdeveloper_db_user:PnvBxy3CUfX3VvMU@cluster0.pnvfozw.mongodb.net/?retryWrites=true&w=majority"
+      "required": false
     },
     "BOT_NAME": {
       "description": "Name of your bot",

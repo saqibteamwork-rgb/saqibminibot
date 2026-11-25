@@ -2,14 +2,12 @@
 
 /**
  * ============================================================================
- * MINI BOT MD :: ULTRA-LIGHTWEIGHT 24/7 ZERO-SLEEP WHATSAPP BOT FOR HEROKU
+ * MINI BOT MD v2.0 :: ULTRA-LIGHTWEIGHT 24/7 ZERO-SLEEP WHATSAPP BOT
  * ============================================================================
- * Features:
- * 1. Ultra-Low RAM Footprint (~35MB - 50MB) — Never hits Heroku 512MB RAM limit!
- * 2. 24/7 Zero-Sleep Keepalive Engine — Self-pings public router every 25s.
- * 3. Web Pairing Code Generator (/pair?number=9234xxxxxxxxx).
- * 4. Automatic Cloud Session Backup to MongoDB Atlas (Persistent login across dyno restarts).
- * 5. Instant Command Dispatcher (.ping, .menu, .alive, .ram, .owner, .echo).
+ * - Baileys v7 (@whiskeysockets/baileys) with @lid <-> @s.whatsapp.net support
+ * - 140+ Commands across Menu, Owner, Group, Channel, Downloader & Tools
+ * - Lean MongoDB Atlas cloud backup + 401 anti-logout shield
+ * - Safe /pair endpoint + 25s Heroku keepalive + crash guards
  * ============================================================================
  */
 
@@ -29,67 +27,183 @@ const {
     makeCacheableSignalKeyStore,
     Browsers,
     jidNormalizedUser,
-    downloadContentFromMessage,
-    delay
+    areJidsSameUser
 } = require('@whiskeysockets/baileys');
 
-// Configuration
+const configStore = require('./src/configStore');
+const registry = require('./src/commands');
+const {
+    escapeHtml,
+    unwrapMessage,
+    getContextInfo,
+    getTextFromContent,
+    resolveSenderDigits,
+    getGroupAdminState,
+    extractMedia,
+    formatUptime,
+    sleep
+} = require('./src/mediaHelper');
+
 const PORT = process.env.PORT || 3000;
 const SESSION_DIR = path.join(__dirname, 'session');
-const BOT_NAME = process.env.BOT_NAME || 'MINI BOT MD';
-const OWNER_NAME = process.env.OWNER_NAME || 'MR SAQIB';
-const OWNER_NUMBER = process.env.OWNER_NUMBER || '923438673242';
-const MONGODB_URI = process.env.MONGODB_URI || '';
+const MONGODB_URI = (process.env.MONGODB_URI || '').trim();
 const BOOT_TIME = Date.now();
+
+fs.ensureDirSync(SESSION_DIR);
+
+// Global process crash shields
+process.on('uncaughtException', (err) => {
+    console.error('🛡️ [UncaughtException Guard]:', err?.stack || err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('🛡️ [UnhandledRejection Guard]:', reason?.stack || reason?.message || reason);
+});
 
 let sock = null;
 let isConnected = false;
 let isConnecting = false;
+let connectStartedAt = 0;
+let reconnectTimer = null;
+let consecutive401Count = 0;
 let currentPairingCode = null;
-let saveCredsCallback = null;
-let mongoDb = null;
+let cachedBaileysVersion = null;
+
 let mongoClient = null;
+let mongoDb = null;
+let mongoConnecting = false;
+let backupDebounceTimer = null;
 
-// In-Memory message store for instant Baileys retry resolution (Eliminates "Waiting for this message")
+// Bounded Caches (keeps Heroku RAM safely below 120MB)
 const messageStore = new Map();
+const processedMsgIds = new Set();
+const antideleteCache = new Map();
+const groupMetaCache = new Map();
 
-// Ensure session directory exists
-fs.ensureDirSync(SESSION_DIR);
+function capSet(set, key, max = 1500) {
+    set.add(key);
+    if (set.size > max) {
+        const first = set.values().next().value;
+        set.delete(first);
+    }
+}
 
-// ═════════════════════════════════════════════════════════════
-// 1. MONGODB ATLAS CLOUD BACKUP & RESTORE (Zero Login Loss)
-// ═════════════════════════════════════════════════════════════
+function capMap(map, key, val, max = 2000) {
+    map.set(key, val);
+    if (map.size > max) {
+        const first = map.keys().next().value;
+        map.delete(first);
+    }
+}
 
-async function initMongo() {
-    if (!MONGODB_URI) return null;
-    if (mongoDb) return mongoDb;
+function cacheMessage(msg) {
+    if (!msg?.key?.id || !msg?.message) return;
+    const id = msg.key.id;
+    capMap(messageStore, id, msg.message, 2000);
+    if (msg.key.remoteJid) {
+        capMap(messageStore, `${msg.key.remoteJid}:${id}`, msg.message, 2000);
+    }
+}
+
+async function getCachedGroupMeta(jid) {
+    if (!jid || !sock) return null;
+    const hit = groupMetaCache.get(jid);
+    if (hit && Date.now() - hit.ts < 30000) return hit.meta;
     try {
-        mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
-        await mongoClient.connect();
-        mongoDb = mongoClient.db('mr_saqib_bot');
-        console.log('✅ [MongoDB] Connected to Atlas Cloud for persistent session backup!');
-        return mongoDb;
-    } catch (e) {
-        console.warn('⚠️ [MongoDB Warning] Connection failed:', e.message);
+        const meta = await sock.groupMetadata(jid);
+        capMap(groupMetaCache, jid, { ts: Date.now(), meta }, 150);
+        return meta;
+    } catch (_) {
         return null;
     }
 }
 
-async function restoreSessionFromCloud() {
+function getMemoryUsageMb() {
+    return Math.round(process.memoryUsage().rss / (1024 * 1024));
+}
+
+function getUptimeSec() {
+    return Math.floor((Date.now() - BOOT_TIME) / 1000);
+}
+
+function trimCaches() {
+    if (messageStore.size > 400) {
+        const excess = messageStore.size - 400;
+        let i = 0;
+        for (const k of messageStore.keys()) {
+            messageStore.delete(k);
+            if (++i >= excess) break;
+        }
+    }
+    if (antideleteCache.size > 150) antideleteCache.clear();
+    if (groupMetaCache.size > 50) groupMetaCache.clear();
+    if (processedMsgIds.size > 1000) processedMsgIds.clear();
+}
+
+// ═════════════════════════════════════════════════════════════
+// 1. MONGODB ATLAS LEAN AUTH BACKUP & AUTO-RECOVERY
+// ═════════════════════════════════════════════════════════════
+
+function resetMongoOnError(err) {
+    const m = String(err?.message || err || '');
+    if (/SSL|TLS|topology|closed|network|ECONNRESET|ETIMEDOUT|pool|alert/i.test(m)) {
+        mongoDb = null;
+        try { mongoClient?.close?.(); } catch (_) {}
+        mongoClient = null;
+    }
+}
+
+async function initMongo() {
+    if (!MONGODB_URI) return null;
+    if (mongoDb) return mongoDb;
+    if (mongoConnecting) return null;
+    mongoConnecting = true;
+    try {
+        mongoClient = new MongoClient(MONGODB_URI, {
+            serverSelectionTimeoutMS: 8000,
+            maxPoolSize: 5
+        });
+        await mongoClient.connect();
+        mongoDb = mongoClient.db('mr_saqib_bot');
+        console.log('✅ [MongoDB] Connected to Atlas Cloud.');
+        return mongoDb;
+    } catch (e) {
+        console.warn('⚠️ [MongoDB Warning]:', e.message);
+        resetMongoOnError(e);
+        return null;
+    } finally {
+        mongoConnecting = false;
+    }
+}
+
+configStore.setMongoGetter(initMongo);
+
+function filterLeanSessionFiles(filenames) {
+    const creds = filenames.filter((f) => f === 'creds.json');
+    const appState = filenames.filter((f) => f.startsWith('app-state-sync-key-'));
+    const preKeys = filenames
+        .filter((f) => f.startsWith('pre-key-'))
+        .sort((a, b) => (parseInt(b.replace(/\D/g, ''), 10) || 0) - (parseInt(a.replace(/\D/g, ''), 10) || 0))
+        .slice(0, 60);
+    const senderKeys = filenames.filter((f) => f.startsWith('sender-key-') && !f.startsWith('sender-key-memory-')).slice(0, 120);
+    const chatSessions = filenames.filter((f) => f.startsWith('session-')).slice(0, 120);
+    const identityKeys = filenames.filter((f) => f.startsWith('identity-')).slice(0, 60);
+
+    return new Set([...creds, ...appState, ...preKeys, ...senderKeys, ...chatSessions, ...identityKeys]);
+}
+
+async function restoreSessionFromCloud(force = false) {
     try {
         const credsFile = path.join(SESSION_DIR, 'creds.json');
-        if (fs.existsSync(credsFile)) {
-            console.log('📂 [Session] Local session found on disk. Booting...');
+        if (!force && fs.existsSync(credsFile)) {
+            console.log('📂 [Session] Local session found on disk.');
             return true;
         }
-
         const db = await initMongo();
         if (!db) return false;
 
-        const col = db.collection('mini_bot_auth');
-        const doc = await col.findOne({ _id: 'primary_session' });
-        if (!doc || !doc.data) {
-            console.log('ℹ️ [Session] No cloud session found. Waiting for pairing code...');
+        const doc = await db.collection('mini_bot_auth').findOne({ _id: 'primary_session' });
+        if (!doc?.data) {
+            console.log('ℹ️ [Session] No cloud backup found in Atlas.');
             return false;
         }
 
@@ -98,204 +212,134 @@ async function restoreSessionFromCloud() {
         else if (doc.data?.buffer) buffer = Buffer.from(doc.data.buffer);
         else buffer = Buffer.from(doc.data, 'base64');
 
-        const jsonStr = zlib.gunzipSync(buffer).toString('utf8');
-        const filesMap = JSON.parse(jsonStr);
+        const filesMap = JSON.parse(zlib.gunzipSync(buffer).toString('utf8'));
+        if (!filesMap['creds.json']) return false;
 
+        await fs.ensureDir(SESSION_DIR);
         for (const [filename, content] of Object.entries(filesMap)) {
-            await fs.writeFile(path.join(SESSION_DIR, filename), content, 'utf8');
+            const safeName = path.basename(filename);
+            await fs.writeFile(path.join(SESSION_DIR, safeName), String(content), 'utf8');
         }
-
-        console.log(`📥 [Session] Restored ${Object.keys(filesMap).length} auth files from MongoDB Atlas cloud!`);
+        console.log(`📥 [Session] Restored ${Object.keys(filesMap).length} auth files from MongoDB Atlas.`);
         return true;
     } catch (e) {
         console.warn('⚠️ [Session Restore Error]:', e.message);
+        resetMongoOnError(e);
         return false;
     }
 }
 
-let backupDebounceTimer = null;
+async function executeCloudBackupNow() {
+    if (!MONGODB_URI) return false;
+    try {
+        const credsFile = path.join(SESSION_DIR, 'creds.json');
+        if (!fs.existsSync(credsFile)) return false;
+
+        const allFiles = await fs.readdir(SESSION_DIR);
+        const leanSet = filterLeanSessionFiles(allFiles);
+        const filesMap = {};
+        for (const f of leanSet) {
+            const fp = path.join(SESSION_DIR, f);
+            const stat = await fs.stat(fp).catch(() => null);
+            if (stat?.isFile()) {
+                filesMap[f] = await fs.readFile(fp, 'utf8');
+            }
+        }
+        if (!filesMap['creds.json']) return false;
+
+        const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'));
+        const db = await initMongo();
+        if (!db) return false;
+
+        await db.collection('mini_bot_auth').updateOne(
+            { _id: 'primary_session' },
+            {
+                $set: {
+                    _id: 'primary_session',
+                    data: compressed,
+                    fileCount: Object.keys(filesMap).length,
+                    updatedAt: Date.now()
+                }
+            },
+            { upsert: true }
+        );
+        return true;
+    } catch (e) {
+        console.warn('⚠️ [Session Backup Error]:', e.message);
+        resetMongoOnError(e);
+        return false;
+    }
+}
+
 function backupSessionToCloud() {
     if (!MONGODB_URI) return;
     if (backupDebounceTimer) clearTimeout(backupDebounceTimer);
-
-    backupDebounceTimer = setTimeout(async () => {
-        try {
-            const credsFile = path.join(SESSION_DIR, 'creds.json');
-            if (!fs.existsSync(credsFile)) return;
-
-            const files = await fs.readdir(SESSION_DIR);
-            const filesMap = {};
-            for (const f of files) {
-                if (f.startsWith('.')) continue;
-                const filePath = path.join(SESSION_DIR, f);
-                const stat = await fs.stat(filePath);
-                if (stat.isFile()) {
-                    filesMap[f] = await fs.readFile(filePath, 'utf8');
-                }
-            }
-
-            if (!filesMap['creds.json']) return;
-
-            const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'));
-            const db = await initMongo();
-            if (!db) return;
-
-            await db.collection('mini_bot_auth').updateOne(
-                { _id: 'primary_session' },
-                {
-                    $set: {
-                        _id: 'primary_session',
-                        data: compressed,
-                        fileCount: Object.keys(filesMap).length,
-                        updatedAt: Date.now()
-                    }
-                },
-                { upsert: true }
-            );
-            console.log(`☁️ [Session Backup] Session (${Object.keys(filesMap).length} files) safely saved to MongoDB Atlas!`);
-        } catch (e) {
-            console.warn('⚠️ [Session Backup Error]:', e.message);
-        }
-    }, 2500);
+    backupDebounceTimer = setTimeout(() => {
+        executeCloudBackupNow().catch(() => {});
+    }, 3000);
 }
 
 // ═════════════════════════════════════════════════════════════
-// 1.5. CHANNEL & MEDIA HELPERS (.cforward ENGINE)
+// 2. WHATSAPP BAILEYS v7 CLIENT & EVENT ROUTER
 // ═════════════════════════════════════════════════════════════
 
-async function extractQuotedMedia(quotedMsg) {
-    if (!quotedMsg) return null;
-    let content = quotedMsg;
-    while (content.ephemeralMessage || content.viewOnceMessage || content.viewOnceMessageV2 || content.documentWithCaptionMessage) {
-        content = content.ephemeralMessage?.message || content.viewOnceMessage?.message || content.viewOnceMessageV2?.message || content.documentWithCaptionMessage?.message || content;
+function cleanupActiveSocket() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
     }
-    const type = Object.keys(content)[0];
-    const raw = content[type];
-    if (!raw) return null;
-
-    let mediaType = null;
-    if (type === 'imageMessage') mediaType = 'image';
-    else if (type === 'videoMessage') mediaType = 'video';
-    else if (type === 'audioMessage') mediaType = 'audio';
-    else if (type === 'documentMessage') mediaType = 'document';
-    else if (type === 'stickerMessage') mediaType = 'sticker';
-
-    if (!mediaType) return null;
-
-    try {
-        const stream = await downloadContentFromMessage(raw, mediaType);
-        let buffer = Buffer.from([]);
-        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-        return {
-            buffer,
-            mediaType,
-            type,
-            mimetype: raw.mimetype,
-            caption: raw.caption || '',
-            fileName: raw.fileName || 'file'
-        };
-    } catch (e) {
-        console.error('[extractQuotedMedia error]:', e.message);
-        return null;
+    if (sock) {
+        try { sock.ev.removeAllListeners(); } catch (_) {}
+        try { sock.ws?.close?.(); } catch (_) {}
+        try { sock.ws?.socket?.terminate?.(); } catch (_) {}
+        sock = null;
     }
 }
 
-async function resolveChannelTarget(targetStr) {
-    if (!targetStr || !sock) return null;
-    const clean = targetStr.trim();
-
-    // Invite link: https://whatsapp.com/channel/CODE
-    const linkMatch = clean.match(/whatsapp\.com\/channel\/([a-zA-Z0-9_-]+)/i);
-    if (linkMatch) {
-        const code = linkMatch[1];
-        try {
-            const meta = await sock.newsletterMetadata('invite', code);
-            if (meta?.id) {
-                return {
-                    jid: meta.id,
-                    name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel'
-                };
-            }
-        } catch (e) {
-            console.error('[resolveChannelTarget invite error]:', e.message);
-        }
-    }
-
-    // Direct JID: 120363xxx@newsletter
-    if (clean.endsWith('@newsletter')) {
-        let name = 'WhatsApp Channel';
-        try {
-            const meta = await sock.newsletterMetadata('jid', clean);
-            name = meta?.thread_metadata?.name?.text || meta?.name || name;
-        } catch (_) {}
-        return { jid: clean, name };
-    }
-
-    // Numeric ID
-    if (/^\d{10,}$/.test(clean)) {
-        const jid = `${clean}@newsletter`;
-        return { jid, name: 'WhatsApp Channel' };
-    }
-
-    return null;
+function escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-
-async function getAdminChannels() {
-    if (!sock) return [];
-    try {
-        const res = await sock.query({
-            tag: 'iq',
-            attrs: { id: sock.generateMessageTag(), type: 'get', to: 's.whatsapp.net', xmlns: 'w:mex' },
-            content: [{ tag: 'query', attrs: { query_id: '6388546374527196' }, content: Buffer.from(JSON.stringify({ variables: {} }), 'utf-8') }]
-        });
-        const child = Array.isArray(res?.content) ? res.content.find((c) => c?.tag === 'result') : null;
-        if (child?.content) {
-            const data = JSON.parse(Buffer.from(child.content).toString('utf8'));
-            const list = data?.data?.xwa2_newsletter_subscribed || [];
-            return list
-                .filter(item => {
-                    const role = item?.viewer_metadata?.role;
-                    return role === 'ADMIN' || role === 'OWNER';
-                })
-                .map(item => ({
-                    jid: item.id,
-                    name: item.thread_metadata?.name?.text || item.name || item.id
-                }));
-        }
-    } catch (e) {
-        console.warn('[getAdminChannels error]:', e.message);
-    }
-    return [];
-}
-
-// ═════════════════════════════════════════════════════════════
-// 2. WHATSAPP BAILEYS CLIENT (Multi-Device WASocket)
-// ═════════════════════════════════════════════════════════════
 
 async function initWhatsApp(pairingNumber = null) {
-    if (isConnecting) return currentPairingCode;
+    if (isConnecting) {
+        if (Date.now() - connectStartedAt < 45000) {
+            return currentPairingCode;
+        }
+        console.warn('⚠️ [Connect Watchdog] Resetting stuck connection lock...');
+        isConnecting = false;
+    }
+
     isConnecting = true;
+    connectStartedAt = Date.now();
+    currentPairingCode = null;
 
     try {
-        // Clean stale socket if any
-        if (sock) {
-            try { sock.ev.removeAllListeners(); } catch (_) {}
-            try { sock.ws?.close?.(); } catch (_) {}
-            try { sock.ws?.socket?.terminate?.(); } catch (_) {}
-            sock = null;
-        }
+        cleanupActiveSocket();
 
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-        saveCredsCallback = saveCreds;
-        const { version } = await fetchLatestBaileysVersion();
 
-        console.log(`🚀 [Baileys] Booting WASocket (WA v${version.join('.')})...`);
+        const originalKeysSet = state.keys.set;
+        state.keys.set = async (data) => {
+            await originalKeysSet(data);
+            backupSessionToCloud();
+        };
+
+        if (!cachedBaileysVersion) {
+            try {
+                const fetched = await fetchLatestBaileysVersion();
+                cachedBaileysVersion = fetched?.version;
+            } catch (_) {
+                cachedBaileysVersion = [2, 3000, 1025190524];
+            }
+        }
+
+        console.log(`🚀 [Baileys] Booting WASocket (WA v${cachedBaileysVersion.join('.')})...`);
 
         sock = makeWASocket({
-            version,
+            version: cachedBaileysVersion,
             auth: {
                 creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })),
+                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' }))
             },
             printQRInTerminal: false,
             logger: pino({ level: 'fatal' }),
@@ -303,44 +347,51 @@ async function initWhatsApp(pairingNumber = null) {
             syncFullHistory: false,
             markOnlineOnConnect: true,
             keepAliveIntervalMs: 15000,
-            connectTimeoutMs: 30000,
+            connectTimeoutMs: 25000,
             defaultQueryTimeoutMs: 25000,
             emitOwnEvents: true,
+            retryRequestDelayMs: 2000,
+            maxMsgRetryCount: 5,
+            cachedGroupMetadata: async (jid) => getCachedGroupMeta(jid),
             getMessage: async (key) => {
-                if (key?.id && messageStore.has(key.id)) {
-                    return messageStore.get(key.id);
+                if (!key || key.remoteJid?.endsWith('@newsletter')) return undefined;
+                if (key.id && messageStore.has(key.id)) return messageStore.get(key.id);
+                if (key.remoteJid && key.id && messageStore.has(`${key.remoteJid}:${key.id}`)) {
+                    return messageStore.get(`${key.remoteJid}:${key.id}`);
                 }
                 return undefined;
             }
         });
 
-        // Global Safe-Send wrapper: protects against WhatsApp Companion loopback decryption delay & caches for retries
+        // Safe-Send wrapper: routes self-chat cleanly to phone JID & strips self-quotes to prevent E2EE stalls
         const rawSendMessage = sock.sendMessage.bind(sock);
         sock.sendMessage = async (jid, content, options = {}) => {
-            const botJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
-            const targetJid = jid ? jidNormalizedUser(jid) : null;
-            const isSelfChat = Boolean(botJid && targetJid && botJid === targetJid);
+            const botPn = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+            const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+            let targetJid = jid ? jidNormalizedUser(jid) : null;
 
-            if (options && options.quoted) {
-                const qKey = options.quoted.key;
-                if (qKey?.fromMe || isSelfChat) {
-                    options = { ...options };
-                    delete options.quoted;
+            if (targetJid && !targetJid.endsWith('@g.us') && !targetJid.endsWith('@newsletter')) {
+                if (
+                    (botLid && (targetJid === botLid || areJidsSameUser(targetJid, botLid))) ||
+                    (botPn && areJidsSameUser(targetJid, botPn))
+                ) {
+                    targetJid = botPn;
+                    jid = botPn;
                 }
+            }
+
+            const isSelf = Boolean(botPn && targetJid && (botPn === targetJid || areJidsSameUser(botPn, targetJid)));
+            if (options?.quoted && (options.quoted.key?.fromMe || isSelf)) {
+                options = { ...options };
+                delete options.quoted;
             }
 
             const sentMsg = await rawSendMessage(jid, content, options);
-            if (sentMsg?.key?.id && sentMsg.message) {
-                messageStore.set(sentMsg.key.id, sentMsg.message);
-                if (messageStore.size > 1000) {
-                    const oldestKey = messageStore.keys().next().value;
-                    messageStore.delete(oldestKey);
-                }
-            }
+            cacheMessage(sentMsg);
             return sentMsg;
         };
 
-        // 1. Save credentials on update
+        // ALWAYS register ALL event listeners BEFORE calling requestPairingCode!
         sock.ev.on('creds.update', async () => {
             try {
                 await saveCreds();
@@ -348,396 +399,296 @@ async function initWhatsApp(pairingNumber = null) {
             } catch (_) {}
         });
 
-        // 2. Connection state updates
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
 
             if (connection === 'close') {
-                const statusCode = (lastDisconnect?.error)?.output?.statusCode || (lastDisconnect?.error)?.statusCode;
-                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+                const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
                 isConnected = false;
                 isConnecting = false;
-                console.log(`⚠️ [Connection Closed] Status code: ${statusCode || 'unknown'}`);
 
-                if (isLoggedOut) {
-                    console.log('🔴 [WhatsApp] Session logged out. Clearing local session folder.');
+                console.log(`⚠️ [Connection Closed] Status: ${statusCode || 'unknown'}`);
+
+                if (statusCode === DisconnectReason.loggedOut) {
+                    consecutive401Count++;
+                    if (consecutive401Count < 3 && fs.existsSync(path.join(SESSION_DIR, 'creds.json'))) {
+                        console.warn(`🛡️ [401 Shield] Transient 401 #${consecutive401Count}/3 — restoring & retrying...`);
+                        await restoreSessionFromCloud(true).catch(() => {});
+                        reconnectTimer = setTimeout(() => initWhatsApp().catch(() => {}), consecutive401Count * 5000);
+                        return;
+                    }
+                    console.log('🔴 [LoggedOut] Session revoked after repeated 401. Clearing local session...');
                     try { await fs.emptyDir(SESSION_DIR); } catch (_) {}
                 } else {
-                    console.log('🔄 [Auto-Reconnect] Reconnecting to WhatsApp in 3 seconds...');
-                    setTimeout(() => initWhatsApp().catch(() => {}), 3000);
+                    consecutive401Count = 0;
+                    const waitMs = statusCode === DisconnectReason.restartRequired ? 1500 : 4000;
+                    reconnectTimer = setTimeout(() => initWhatsApp().catch(() => {}), waitMs);
                 }
             } else if (connection === 'open') {
                 isConnected = true;
                 isConnecting = false;
+                consecutive401Count = 0;
                 currentPairingCode = null;
-                const botJid = jidNormalizedUser(sock.user.id);
-                console.log(`\n🎉 ═════════════════════════════════════════════`);
-                console.log(`   🟢 [CONNECTED] ${BOT_NAME} IS ONLINE!`);
-                console.log(`   📞 WhatsApp ID: ${botJid}`);
-                console.log(`   💾 Current RAM: ${getMemoryUsageMb()} MB / 512 MB`);
-                console.log(`═════════════════════════════════════════════════\n`);
 
-                // Send self connected confirmation
+                const cfg = configStore.getConfig();
+                const botJid = jidNormalizedUser(sock.user.id);
+                const totalCmds = registry.getAllCommands().length;
+
+                console.log(`🟢 [CONNECTED] ${cfg.botName} ONLINE as ${botJid} (${totalCmds} commands | RAM ${getMemoryUsageMb()}MB)`);
+
+                // Send startup confirmation cleanly
                 try {
                     await sock.sendMessage(botJid, {
-                        text: `╭━━━〔 ⚡ *${BOT_NAME}* ⚡ 〕━━━┈⊷\n` +
-                              `┃ 🟢 *Status:* 100% Connected\n` +
-                              `┃ 🚀 *Platform:* Heroku 24/7 Zero-Sleep\n` +
-                              `┃ 💾 *RAM Usage:* ${getMemoryUsageMb()} MB / 512 MB\n` +
-                              `┃ ⏱️ *KeepAlive:* 25s Public Self-Ping\n` +
+                        text: `╭━━━〔 ⚡ *${cfg.botName} ONLINE* ⚡ 〕━━━┈⊷\n` +
+                              `┃ 🟢 *Status:* Connected (Baileys v7)\n` +
+                              `┃ 🛠️ *Commands:* ${totalCmds}+ Loaded\n` +
+                              `┃ 💾 *RAM:* ${getMemoryUsageMb()} MB / 512 MB\n` +
+                              `┃ ⏱️ *KeepAlive:* 25s Zero-Sleep Active\n` +
                               `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-                              `_Type *.ping* or *.menu* to test commands!_`
+                              `_Type *${cfg.prefix}menu* to explore all categories!_`
                     });
                 } catch (_) {}
 
                 backupSessionToCloud();
+
+                // Background auto-follow configured channels if any
+                if (Array.isArray(cfg.autoFollowChannels) && cfg.autoFollowChannels.length > 0) {
+                    setTimeout(async () => {
+                        for (const ch of cfg.autoFollowChannels) {
+                            try {
+                                await sock?.newsletterFollow?.(ch.jid);
+                                await sleep(800);
+                            } catch (_) {}
+                        }
+                    }, 12000);
+                }
             }
         });
 
-        // 3. Pairing Code Generator (If requested via Web UI)
-        if (pairingNumber && !sock.authState.creds.registered) {
-            pairingNumber = pairingNumber.replace(/[^0-9]/g, '');
-            await delay(1500);
-            const code = await sock.requestPairingCode(pairingNumber);
-            currentPairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            console.log(`🔑 [Pairing Code] Generated code for +${pairingNumber}: ${currentPairingCode}`);
-            isConnecting = false;
-            return currentPairingCode;
-        }
+        sock.ev.on('group-participants.update', async (ev) => {
+            try {
+                const { id: groupJid, participants, action } = ev || {};
+                if (!groupJid || !Array.isArray(participants) || !['add', 'remove'].includes(action)) return;
+                const gs = configStore.getGroupSettings(groupJid);
+                if (action === 'add' && !gs.welcome) return;
+                if (action === 'remove' && !gs.goodbye) return;
 
-        // 4. Inbound Message & Command Engine
+                const meta = await getCachedGroupMeta(groupJid);
+                const groupName = meta?.subject || 'this group';
+                for (const rawParticipant of participants) {
+                    const pJid = typeof rawParticipant === 'string' ? rawParticipant : rawParticipant?.id;
+                    if (!pJid) continue;
+                    const tag = `@${pJid.split('@')[0]}`;
+                    const template = action === 'add'
+                        ? (gs.welcomeText || `👋 Khush Amdeed ${tag} in *${groupName}*!`)
+                        : (gs.goodbyeText || `👋 Allah Hafiz ${tag}!`);
+                    const finalMsg = template.replace(/@user/gi, tag).replace(/@group/gi, groupName);
+                    await sock.sendMessage(groupJid, { text: finalMsg, mentions: [pJid] }).catch(() => {});
+                }
+            } catch (_) {}
+        });
+
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
-            if (!Array.isArray(messages)) return;
+            if (type !== 'notify' || !Array.isArray(messages)) return;
 
             for (const msg of messages) {
-                if (!msg?.message || msg.key?.remoteJid?.endsWith('@newsletter')) continue;
-
-                // Cache message in memory for instant Signal ratchet retry responses
-                if (msg.key?.id && msg.message) {
-                    messageStore.set(msg.key.id, msg.message);
-                    if (messageStore.size > 1000) {
-                        const oldestKey = messageStore.keys().next().value;
-                        messageStore.delete(oldestKey);
-                    }
-                }
-
-                // Check for decryption errors & auto-reset corrupted ratchet key for this sender
-                if (msg.messageStubType === 1 || msg.messageStubType === 2) {
-                    console.warn(`⚠️ Received undecryptable message (Stub ${msg.messageStubType}). Auto-healing session...`);
-                    const senderKey = msg.key?.participant || msg.key?.remoteJid;
-                    if (senderKey && !senderKey.endsWith('@newsletter')) {
-                        try {
-                            const sFile = path.join(SESSION_DIR, `session-${senderKey.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
-                            if (fs.existsSync(sFile)) {
-                                fs.unlinkSync(sFile);
-                            }
-                        } catch (_) {}
-                    }
-                }
-
                 try {
-                    let from = msg.key?.remoteJid;
-                    if (!from || from === 'status@broadcast') {
-                        if (msg.message?.deviceSentMessage?.destinationJid) {
-                            from = msg.message.deviceSentMessage.destinationJid;
+                    if (!msg?.message || !msg.key) continue;
+                    const msgId = msg.key.id;
+                    if (msgId && processedMsgIds.has(msgId)) continue;
+                    if (msgId) capSet(processedMsgIds, msgId, 1500);
+
+                    cacheMessage(msg);
+                    const cfg = configStore.getConfig();
+
+                    // Auto-view WhatsApp statuses if enabled
+                    if (msg.key.remoteJid === 'status@broadcast') {
+                        if (cfg.autoviewStatus && !msg.key.fromMe) {
+                            await sock.readMessages([msg.key]).catch(() => {});
                         }
-                    }
-                    const botJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
-                    if (!from || from === 'status@broadcast') {
-                        from = botJid;
-                    }
-                    if (!from) continue;
-
-                    const targetJid = from ? jidNormalizedUser(from) : null;
-                    const isSelfChat = Boolean(botJid && targetJid && botJid === targetJid);
-                    const isGroup = from && from.endsWith('@g.us');
-                    // In self-chat or 1-on-1 private chat, NEVER quote to eliminate E2EE loopback decryption stalls!
-                    const quoteOpt = isGroup ? { quoted: msg } : {};
-                    const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
-
-                    // Deep unwrap containers (ephemeral, viewOnce, deviceSentMessage)
-                    let content = msg.message;
-                    while (content && (
-                        content.ephemeralMessage ||
-                        content.viewOnceMessage ||
-                        content.viewOnceMessageV2 ||
-                        content.deviceSentMessage ||
-                        content.documentWithCaptionMessage
-                    )) {
-                        content =
-                            content.ephemeralMessage?.message ||
-                            content.viewOnceMessage?.message ||
-                            content.viewOnceMessageV2?.message ||
-                            content.deviceSentMessage?.message ||
-                            content.documentWithCaptionMessage?.message ||
-                            content;
+                        if (!msg.message?.deviceSentMessage?.destinationJid) continue;
                     }
 
+                    if (msg.key.remoteJid?.endsWith('@newsletter')) continue;
+
+                    // Handle Anti-Delete revoke notifications
+                    const protoMsg = msg.message?.protocolMessage;
+                    if (protoMsg?.type === 0 && cfg.antidelete) {
+                        const revokedId = protoMsg.key?.id;
+                        const cached = revokedId ? antideleteCache.get(revokedId) : null;
+                        if (cached && sock?.user?.id) {
+                            const botPn = jidNormalizedUser(sock.user.id);
+                            await sock.sendMessage(botPn, {
+                                text: `🛡️ *ANTI-DELETE RECOVERED*\n👤 *From:* ${cached.chat}\n📱 *Sender:* +${cached.sender}\n\n📝 *Message:*\n${cached.text || '[Media / Non-Text]'}`
+                            }).catch(() => {});
+                        }
+                        continue;
+                    }
+
+                    const botPn = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+                    const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+                    const botDigits = configStore.normalizeDigits(botPn);
+
+                    let rawFrom = msg.key.remoteJid;
+                    if ((!rawFrom || rawFrom === 'status@broadcast') && msg.message?.deviceSentMessage?.destinationJid) {
+                        rawFrom = msg.message.deviceSentMessage.destinationJid;
+                    }
+                    if (!rawFrom || rawFrom === 'status@broadcast') rawFrom = botPn;
+                    if (!rawFrom) continue;
+
+                    let from = jidNormalizedUser(rawFrom);
+                    const isFromMe = Boolean(msg.key.fromMe);
+                    const isGroup = from.endsWith('@g.us');
+
+                    const isSelfChat = isFromMe && (
+                        from === botPn ||
+                        from === botLid ||
+                        areJidsSameUser(from, botPn) ||
+                        (botLid && areJidsSameUser(from, botLid))
+                    );
+
+                    if (isSelfChat && botPn) {
+                        from = botPn;
+                    } else if (from.endsWith('@lid')) {
+                        const alt = msg.key.remoteJidAlt || msg.key.participantAlt;
+                        if (alt && alt.endsWith('@s.whatsapp.net')) from = jidNormalizedUser(alt);
+                    }
+
+                    const groupMeta = isGroup ? await getCachedGroupMeta(from) : null;
+                    const senderRawJid = isGroup ? (msg.key.participant || from) : from;
+                    const senderDigits = await resolveSenderDigits(sock, msg, groupMeta);
+                    const isOwner = isFromMe || configStore.isOwnerDigits(senderDigits) || (botDigits && senderDigits === botDigits);
+
+                    // Auto-ViewOnce recovery if enabled
+                    const rawRoot = msg.message;
+                    const isViewOnceMsg = Boolean(
+                        rawRoot.viewOnceMessage || rawRoot.viewOnceMessageV2 || rawRoot.viewOnceMessageV2Extension
+                    );
+                    if (cfg.autovv && isViewOnceMsg && !isFromMe && botPn) {
+                        extractMedia(rawRoot).then(async (voMedia) => {
+                            if (!voMedia) return;
+                            const voCap = `🔓 *AUTO VIEW-ONCE*\n👤 *From:* +${senderDigits || 'Unknown'}`;
+                            if (voMedia.mediaType === 'image') await sock.sendMessage(botPn, { image: voMedia.buffer, caption: voCap });
+                            else if (voMedia.mediaType === 'video') await sock.sendMessage(botPn, { video: voMedia.buffer, caption: voCap });
+                            else if (voMedia.mediaType === 'audio') await sock.sendMessage(botPn, { audio: voMedia.buffer, mimetype: voMedia.mimetype || 'audio/mp4', ptt: voMedia.ptt });
+                        }).catch(() => {});
+                    }
+
+                    const content = unwrapMessage(rawRoot);
                     if (!content) continue;
 
-                    const quotedMsg =
-                        content.extendedTextMessage?.contextInfo?.quotedMessage ||
-                        content.imageMessage?.contextInfo?.quotedMessage ||
-                        content.videoMessage?.contextInfo?.quotedMessage ||
-                        content.documentMessage?.contextInfo?.quotedMessage ||
-                        content.audioMessage?.contextInfo?.quotedMessage ||
-                        null;
+                    const mCtx = getContextInfo(content);
+                    const quotedMsg = mCtx?.quotedMessage || null;
+                    const rawText = getTextFromContent(content);
 
-                    const rawText = (
-                        content.conversation ||
-                        content.extendedTextMessage?.text ||
-                        content.imageMessage?.caption ||
-                        content.videoMessage?.caption ||
-                        content.documentMessage?.caption ||
-                        ''
-                    ).trim();
+                    if (cfg.antidelete && msgId && rawText && !isFromMe) {
+                        capMap(antideleteCache, msgId, { chat: groupMeta?.subject || from, sender: senderDigits, text: rawText }, 500);
+                    }
+
+                    // Group Anti-Link enforcement
+                    if (isGroup && rawText && !isOwner && !isFromMe) {
+                        const gs = configStore.getGroupSettings(from);
+                        if (gs.antilink && /(https?:\/\/)?(chat\.whatsapp\.com|whatsapp\.com\/channel)\/\S+/i.test(rawText)) {
+                            const adminState = getGroupAdminState(sock, groupMeta, senderRawJid, senderDigits);
+                            if (!adminState.isSenderAdmin && adminState.isBotAdmin) {
+                                await sock.sendMessage(from, { delete: msg.key }).catch(() => {});
+                                const warns = configStore.addWarning(from, senderDigits);
+                                if (warns >= 3) {
+                                    configStore.resetWarnings(from, senderDigits);
+                                    await sock.groupParticipantsUpdate(from, [senderRawJid], 'remove').catch(() => {});
+                                    await sock.sendMessage(from, { text: `🚨 *ANTI-LINK:* @${senderRawJid.split('@')[0]} 3/3 warnings par remove ho gaye!`, mentions: [senderRawJid] }).catch(() => {});
+                                } else {
+                                    await sock.sendMessage(from, { text: `🔗 *ANTI-LINK:* @${senderRawJid.split('@')[0]} group mein link allow nahi! (Warning *${warns}/3*)`, mentions: [senderRawJid] }).catch(() => {});
+                                }
+                                continue;
+                            }
+                        }
+                    }
 
                     if (!rawText) continue;
 
-                    // Match commands with or without prefix (.ping, /ping, !ping, ping)
                     const cleanText = rawText.replace(/[\u200e\u200f\u200b\u200c\u200d\u2060\ufeff]/g, '').trim();
-                    const cmdMatch = cleanText.match(/^([.#!/?])?\s*([a-zA-Z0-9_-]+)([\s\S]*)$/);
-                    if (!cmdMatch) continue;
+                    const activePrefix = cfg.prefix || '.';
+                    const prefixRegex = new RegExp(`^(${escapeRegExp(activePrefix)})\\s*([a-zA-Z0-9_-]+)([\\s\\S]*)$`);
+                    const match = cleanText.match(prefixRegex);
+                    if (!match) continue;
 
-                    const prefix = cmdMatch[1] || '';
-                    const command = cmdMatch[2].toLowerCase();
-                    const args = (cmdMatch[3] || '').trim().split(/\s+/).filter(Boolean);
-                    const fullArgs = (cmdMatch[3] || '').trim();
+                    // Ignore stale queued commands older than 2 minutes on reconnect
+                    const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
+                    if (Date.now() - msgTime > 120000) continue;
 
-                    // Only react to known commands or prefixed commands
-                    const validCommands = ['ping', 'menu', 'help', 'alive', 'ram', 'memory', 'speed', 'owner', 'echo', 'status', 'cforward', 'chforward', 'cforwrd', 'chfwd'];
-                    if (!prefix && !validCommands.includes(command)) continue;
+                    if (cfg.mode !== 'public' && !isOwner) continue;
+                    if (!isOwner && configStore.isBannedDigits(senderDigits)) continue;
 
-                    console.log(`📩 [CMD] Received ".${command}" from ${from}`);
+                    const commandName = match[2].toLowerCase();
+                    const fullArgs = (match[3] || '').trim();
+                    const args = fullArgs ? fullArgs.split(/\s+/).filter(Boolean) : [];
+                    const cmd = registry.findCommand(commandName);
+                    if (!cmd) continue;
 
-                    switch (command) {
-                        case 'ping':
-                        case 'speed': {
-                            const latency = Date.now() - msgTime;
-                            const speedMs = latency > 0 ? latency : Math.floor(Math.random() * 25) + 15;
-                            const memMb = getMemoryUsageMb();
-                            const uptimeStr = formatUptime(Math.floor((Date.now() - BOOT_TIME) / 1000));
-
-                            await sock.sendMessage(from, {
-                                text: `⚡ *PONG! MINI BOT IS ALIVE!* ⚡\n\n` +
-                                      `⏱️ *Response Time:* ${speedMs} ms\n` +
-                                      `💾 *Heroku RAM:* ${memMb} MB / 512 MB (Safe!)\n` +
-                                      `⏳ *Uptime:* ${uptimeStr}\n` +
-                                      `🚀 *Engine:* 24/7 Zero-Sleep Public Mesh\n` +
-                                      `🛡️ *Status:* 🟢 Connected & Healthy`
-                            }, quoteOpt);
-                            break;
-                        }
-
-                        case 'menu':
-                        case 'help': {
-                            await sock.sendMessage(from, {
-                                text: `╭━━━〔 🤖 *${BOT_NAME}* 〕━━━┈⊷\n` +
-                                      `┃ 👑 *Owner:* ${OWNER_NAME}\n` +
-                                      `┃ 🚀 *Uptime:* ${formatUptime(Math.floor((Date.now() - BOOT_TIME) / 1000))}\n` +
-                                      `┃ 💾 *RAM:* ${getMemoryUsageMb()} MB / 512 MB\n` +
-                                      `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-                                      `📌 *AVAILABLE COMMANDS:*\n` +
-                                      `• *.ping* — Check bot speed & response latency\n` +
-                                      `• *.cforward* — Forward post, media or text to WhatsApp Channels\n` +
-                                      `• *.alive* — Verify 24/7 online status\n` +
-                                      `• *.ram* — Real-time Heroku RAM usage stats\n` +
-                                      `• *.owner* — Bot developer contact info\n` +
-                                      `• *.echo <text>* — Test message echo response\n` +
-                                      `• *.status* — Server health & uptime details\n\n` +
-                                      `_⚡ Running ultra-fast on Heroku Zero-Sleep Engine!_`
-                            }, quoteOpt);
-                            break;
-                        }
-
-                        case 'alive':
-                        case 'status': {
-                            await sock.sendMessage(from, {
-                                text: `🟢 *${BOT_NAME} IS 100% ONLINE & RUNNING!* 🟢\n\n` +
-                                      `Server has been running continuously for:\n` +
-                                      `👉 *${formatUptime(Math.floor((Date.now() - BOOT_TIME) / 1000))}*\n\n` +
-                                      `Heroku idle sleep is permanently bypassed using automatic 25s self-pings!`
-                            }, quoteOpt);
-                            break;
-                        }
-
-                        case 'ram':
-                        case 'memory': {
-                            const mem = process.memoryUsage();
-                            const rssMb = Math.round(mem.rss / (1024 * 1024));
-                            const heapUsedMb = Math.round(mem.heapUsed / (1024 * 1024));
-                            const heapTotalMb = Math.round(mem.heapTotal / (1024 * 1024));
-                            const freeBudget = 512 - rssMb;
-
-                            await sock.sendMessage(from, {
-                                text: `📊 *HEROKU RAM & MEMORY METRICS:*\n\n` +
-                                      `• *RSS (Total RAM):* ${rssMb} MB / 512 MB\n` +
-                                      `• *V8 Heap Used:* ${heapUsedMb} MB\n` +
-                                      `• *V8 Heap Total:* ${heapTotalMb} MB\n` +
-                                      `• *Free RAM Headroom:* ${freeBudget} MB\n` +
-                                      `• *OOM Risk Level:* 🟢 ZERO (Well below 512MB limit)`
-                            }, quoteOpt);
-                            break;
-                        }
-
-                        case 'owner': {
-                            await sock.sendMessage(from, {
-                                text: `👑 *BOT OWNER & DEVELOPER*\n\n` +
-                                      `• *Name:* ${OWNER_NAME}\n` +
-                                      `• *Number:* wa.me/${OWNER_NUMBER}\n` +
-                                      `• *Bot:* ${BOT_NAME}`
-                            }, quoteOpt);
-                            break;
-                        }
-
-                        case 'echo': {
-                            if (!fullArgs) {
-                                await sock.sendMessage(from, { text: `⚠️ Usage: *.echo Hello World*` }, quoteOpt);
-                                break;
-                            }
-                            await sock.sendMessage(from, { text: `🗣️ *Echo:* ${fullArgs}` }, quoteOpt);
-                            break;
-                        }
-
-                        case 'cforward':
-                        case 'chforward':
-                        case 'cforwrd':
-                        case 'chfwd': {
-                            // 1. Identify destination channel(s) and custom announcement text
-                            let targetChannel = null;
-                            let customText = '';
-
-                            if (args.length > 0) {
-                                const possibleChannel = await resolveChannelTarget(args[0]);
-                                if (possibleChannel) {
-                                    targetChannel = possibleChannel;
-                                    customText = args.slice(1).join(' ').trim();
-                                } else {
-                                    for (let i = 0; i < args.length; i++) {
-                                        const found = await resolveChannelTarget(args[i]);
-                                        if (found) {
-                                            targetChannel = found;
-                                            customText = args.filter((_, idx) => idx !== i).join(' ').trim();
-                                            break;
-                                        }
-                                    }
-                                    if (!targetChannel) {
-                                        customText = fullArgs;
-                                    }
-                                }
-                            }
-
-                            // 2. Identify message content to forward (Quoted message or media)
-                            let mediaPayload = null;
-                            let textPayload = '';
-
-                            if (quotedMsg) {
-                                mediaPayload = await extractQuotedMedia(quotedMsg);
-                                if (!mediaPayload) {
-                                    textPayload =
-                                        quotedMsg.conversation ||
-                                        quotedMsg.extendedTextMessage?.text ||
-                                        quotedMsg.imageMessage?.caption ||
-                                        quotedMsg.videoMessage?.caption ||
-                                        quotedMsg.documentMessage?.caption ||
-                                        '';
-                                }
-                            }
-
-                            // If user typed custom text with .cforward, apply it
-                            if (customText) {
-                                if (mediaPayload) {
-                                    mediaPayload.caption = customText;
-                                } else if (!quotedMsg) {
-                                    textPayload = customText;
-                                }
-                            }
-
-                            // 3. Resolve destination channels list
-                            let destinations = [];
-                            if (targetChannel) {
-                                destinations.push(targetChannel);
-                            } else {
-                                const myChannels = await getAdminChannels();
-                                if (myChannels.length > 0) {
-                                    destinations = myChannels;
-                                }
-                            }
-
-                            if (destinations.length === 0) {
-                                await sock.sendMessage(from, {
-                                    text: `📢 *HOW TO USE .CFORWARD:*\n\n` +
-                                          `1️⃣ *Forward to Channel by Link / ID:*\n` +
-                                          `Reply to any post or media with:\n` +
-                                          `👉 *.cforward https://whatsapp.com/channel/CODE*\n` +
-                                          `👉 *.cforward 120363xxx@newsletter*\n\n` +
-                                          `2️⃣ *Direct Announcement to Channel:*\n` +
-                                          `👉 *.cforward <channel-link> Your message text*\n\n` +
-                                          `3️⃣ *Forward to All Your Admin Channels:*\n` +
-                                          `Reply to any message with:\n` +
-                                          `👉 *.cforward*\n\n` +
-                                          `⚠️ _Koi Admin Channel detect nahi hua. Direct link ya ID de kar bhejein!_`
-                                }, safeQuote);
-                                break;
-                            }
-
-                            if (!mediaPayload && !textPayload) {
-                                await sock.sendMessage(from, {
-                                    text: `⚠️ *Kisi message/media par reply karein ya text likhein!*\n\n` +
-                                          `Example: *.cforward https://whatsapp.com/channel/CODE Hello Friends!*`
-                                }, safeQuote);
-                                break;
-                            }
-
-                            // 4. Send to all destination channels
-                            let successCount = 0;
-                            let failCount = 0;
-                            const channelNames = [];
-
-                            for (const dest of destinations) {
-                                try {
-                                    if (mediaPayload) {
-                                        if (mediaPayload.mediaType === 'image') {
-                                            await sock.sendMessage(dest.jid, { image: mediaPayload.buffer, caption: mediaPayload.caption });
-                                        } else if (mediaPayload.mediaType === 'video') {
-                                            await sock.sendMessage(dest.jid, { video: mediaPayload.buffer, caption: mediaPayload.caption });
-                                        } else if (mediaPayload.mediaType === 'audio') {
-                                            await sock.sendMessage(dest.jid, { audio: mediaPayload.buffer, mimetype: mediaPayload.mimetype || 'audio/mp4' });
-                                        } else if (mediaPayload.mediaType === 'document') {
-                                            await sock.sendMessage(dest.jid, { document: mediaPayload.buffer, mimetype: mediaPayload.mimetype, fileName: mediaPayload.fileName });
-                                        } else if (mediaPayload.mediaType === 'sticker') {
-                                            await sock.sendMessage(dest.jid, { sticker: mediaPayload.buffer });
-                                        }
-                                    } else if (textPayload) {
-                                        await sock.sendMessage(dest.jid, { text: textPayload });
-                                    }
-                                    successCount++;
-                                    channelNames.push(dest.name);
-                                    await delay(1200);
-                                } catch (sendErr) {
-                                    console.error(`[cforward failed for ${dest.jid}]:`, sendErr.message);
-                                    failCount++;
-                                }
-                            }
-
-                            // 5. Send report back
-                            const typeStr = mediaPayload ? mediaPayload.mediaType.toUpperCase() : 'TEXT';
-                            await sock.sendMessage(from, {
-                                text: `📢 *CFORWARD SUMMARY*\n\n` +
-                                      `✅ *Sent:* ${successCount} channel(s)\n` +
-                                      (failCount > 0 ? `❌ *Failed:* ${failCount}\n` : '') +
-                                      `📊 *Type:* ${typeStr}\n` +
-                                      `📋 *Channels:* ${channelNames.slice(0, 5).join(', ')}${channelNames.length > 5 ? ` (+${channelNames.length - 5} more)` : ''}\n\n` +
-                                      `_⚡ Powered by ${BOT_NAME}_`
-                            }, quoteOpt);
-                            break;
-                        }
+                    if (cfg.autoread && !isFromMe) {
+                        sock.readMessages([msg.key]).catch(() => {});
                     }
-                } catch (cmdErr) {
-                    console.error('❌ [Command Error]:', cmdErr.message);
+                    if (cfg.autotyping) {
+                        sock.sendPresenceUpdate('composing', from).catch(() => {});
+                    } else if (cfg.autorecord) {
+                        sock.sendPresenceUpdate('recording', from).catch(() => {});
+                    }
+
+                    const quoteOpt = isGroup ? { quoted: msg } : {};
+                    const ctx = {
+                        sock,
+                        from,
+                        msg,
+                        content,
+                        quotedMsg,
+                        isGroup,
+                        isSelfChat,
+                        isFromMe,
+                        isOwner,
+                        groupMeta,
+                        senderRawJid,
+                        senderDigits,
+                        prefix: activePrefix,
+                        commandName,
+                        args,
+                        fullArgs,
+                        msgTime,
+                        quoteOpt,
+                        registry,
+                        runtime: {
+                            getMemoryUsageMb,
+                            getUptimeSec,
+                            trimCaches,
+                            forceCloudBackup: executeCloudBackupNow
+                        },
+                        reply: (text) => sock.sendMessage(from, { text }, quoteOpt),
+                        react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {})
+                    };
+
+                    try {
+                        await cmd.handler(ctx);
+                    } catch (execErr) {
+                        console.error(`❌ [CMD ${commandName}]:`, execErr.message);
+                        await ctx.react('❌');
+                        await ctx.reply(`❌ *Error (${commandName}):* ${execErr.message}`).catch(() => {});
+                    }
+                } catch (loopErr) {
+                    console.error('❌ [Message Loop Error]:', loopErr.message);
                 }
             }
         });
+
+        // Pairing Code generation (safe because all listeners are ALREADY attached above!)
+        if (pairingNumber && !sock.authState.creds.registered) {
+            const clean = pairingNumber.replace(/[^0-9]/g, '');
+            await delayOrSleep(1500);
+            const code = await sock.requestPairingCode(clean);
+            currentPairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+            console.log(`🔑 [Pairing Code] +${clean} => ${currentPairingCode}`);
+            isConnecting = false;
+            return currentPairingCode;
+        }
 
         isConnecting = false;
         return null;
@@ -748,8 +699,12 @@ async function initWhatsApp(pairingNumber = null) {
     }
 }
 
+function delayOrSleep(ms) {
+    return sleep(ms);
+}
+
 // ═════════════════════════════════════════════════════════════
-// 3. 24/7 ZERO-SLEEP ANTI-SLEEP KEEPALIVE ENGINE
+// 3. 24/7 KEEPALIVE, SOCKET WATCHDOG & MEMORY ENGINE
 // ═════════════════════════════════════════════════════════════
 
 async function pingPublicKeepAlive() {
@@ -759,262 +714,178 @@ async function pingPublicKeepAlive() {
             const cleanUrl = myUrl.replace(/\/+$/, '');
             await axios.get(`${cleanUrl}/health`, {
                 timeout: 5000,
-                headers: { 'User-Agent': 'MiniBot-ZeroSleep/1.0' }
+                headers: { 'User-Agent': 'MiniBot-ZeroSleep/2.0' }
             }).catch(() => null);
         }
     } catch (_) {}
 }
 
-// Every 25 seconds: resets Heroku Router 30-min idle timer!
 setInterval(pingPublicKeepAlive, 25 * 1000);
 
-// WebSocket Watchdog: every 30s checks socket health
 setInterval(() => {
     if (sock && isConnected) {
         const isWsOpen = Boolean(sock.ws?.isOpen || sock.ws?.socket?.readyState === 1);
         if (!isWsOpen) {
-            console.warn('⚠️ [Watchdog] Socket closed or closing. Re-initializing WhatsApp...');
+            console.warn('⚠️ [Watchdog] WebSocket stale. Reconnecting...');
             isConnected = false;
             initWhatsApp().catch(() => {});
         }
     }
 }, 30 * 1000);
 
-// Memory Trimmer: runs garbage collection if RSS > 200MB
 setInterval(() => {
     const memMb = getMemoryUsageMb();
-    if (global.gc && memMb > 200) {
-        try { global.gc(); } catch (_) {}
+    if (memMb > 180) {
+        trimCaches();
+        if (global.gc) {
+            try { global.gc(); } catch (_) {}
+        }
     }
 }, 30 * 1000);
 
+setInterval(() => {
+    if (isConnected) backupSessionToCloud();
+}, 60 * 1000);
+
 // ═════════════════════════════════════════════════════════════
-// 4. EXPRESS WEB DASHBOARD & PAIRING CODE API
+// 4. EXPRESS WEB DASHBOARD & PAIRING API
 // ═════════════════════════════════════════════════════════════
 
 const app = express();
 app.use(express.json());
 
-// Public healthcheck
 app.get(['/health', '/ping'], (req, res) => {
+    const cfg = configStore.getConfig();
     res.json({
         status: 'ok',
-        botName: BOT_NAME,
+        botName: cfg.botName,
         connected: isConnected,
-        uptimeSeconds: Math.floor((Date.now() - BOOT_TIME) / 1000),
+        totalCommands: registry.getAllCommands().length,
+        uptimeSeconds: getUptimeSec(),
         ramUsageMb: getMemoryUsageMb(),
         timestamp: Date.now()
     });
 });
 
-// Pairing Code Endpoint (/pair?number=9234xxxxxxxxx)
 app.get(['/pair', '/code'], async (req, res) => {
     const rawNumber = (req.query.number || req.query.phone || '').toString().trim();
+    const force = req.query.force === '1' || req.query.force === 'true';
+
     if (!rawNumber) {
         return res.status(400).json({ success: false, error: 'Phone number required. Example: /pair?number=923438673242' });
     }
-
     const cleanNumber = rawNumber.replace(/[^0-9]/g, '');
     if (cleanNumber.length < 10 || cleanNumber.length > 15) {
         return res.status(400).json({ success: false, error: 'Invalid phone number format.' });
     }
+    if (isConnected && !force) {
+        const currentDigits = configStore.normalizeDigits(sock?.user?.id);
+        return res.status(409).json({
+            success: false,
+            error: `Bot already connected (+${currentDigits}). Pass ?force=true to re-pair.`
+        });
+    }
+    if (isConnecting && !force) {
+        return res.status(429).json({
+            success: false,
+            error: 'Pairing or connection attempt already in progress. Retry in a few seconds.'
+        });
+    }
 
     try {
-        console.log(`📱 [Web Pair] Requested pairing code for +${cleanNumber}`);
-        // If already connected with another number, clear session for fresh pair
-        if (!isConnected) {
-            await fs.emptyDir(SESSION_DIR);
-        }
+        console.log(`📱 [Web Pair] Generating pairing code for +${cleanNumber}`);
+        isConnecting = false;
+        isConnected = false;
+        consecutive401Count = 0;
+        cleanupActiveSocket();
+        await fs.emptyDir(SESSION_DIR);
 
         const code = await initWhatsApp(cleanNumber);
+        if (!code) {
+            return res.status(503).json({ success: false, error: 'Could not generate pairing code. Please try again.' });
+        }
         return res.json({
             success: true,
             number: cleanNumber,
-            pairingCode: code || currentPairingCode,
+            pairingCode: code,
             instructions: 'Enter this 8-digit code in WhatsApp > Linked Devices > Link with Phone Number'
         });
     } catch (e) {
-        return res.status(500).json({ success: false, error: e.message });
+        return res.status(500).json({ success: false, error: 'Pairing failed: ' + (e.message || 'Unknown error') });
     }
 });
 
-// Responsive Dark Web Dashboard
 app.get('/', (req, res) => {
+    const cfg = configStore.getConfig();
+    const botNameHtml = escapeHtml(cfg.botName);
+    const ownerNameHtml = escapeHtml(cfg.ownerName);
+    const ownerNumberHtml = escapeHtml(cfg.owners[0] || '923438673242');
+    const totalCmds = registry.getAllCommands().length;
     const memMb = getMemoryUsageMb();
-    const uptimeStr = formatUptime(Math.floor((Date.now() - BOOT_TIME) / 1000));
+    const uptimeStr = formatUptime(getUptimeSec());
     const statusColor = isConnected ? '#10b981' : (isConnecting ? '#f59e0b' : '#ef4444');
-    const statusText = isConnected ? 'ONLINE & CONNECTED' : (isConnecting ? 'GENERATING CODE...' : 'OFFLINE / NOT PAIRED');
+    const statusText = isConnected ? 'ONLINE & CONNECTED' : (isConnecting ? 'CONNECTING...' : 'OFFLINE / READY TO PAIR');
 
     res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${BOT_NAME} — 24/7 Zero-Sleep</title>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    <title>${botNameHtml} — 24/7 Zero-Sleep</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Plus Jakarta Sans', sans-serif;
-            background: #090d16;
-            color: #f8fafc;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .card {
-            background: rgba(15, 23, 42, 0.85);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            max-width: 480px;
-            width: 100%;
-            padding: 36px 28px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
-            text-align: center;
-        }
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 16px;
-            border-radius: 9999px;
-            font-size: 13px;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            margin-bottom: 24px;
-        }
-        .dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: ${statusColor};
-            box-shadow: 0 0 12px ${statusColor};
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.85); } }
-        h1 { font-size: 26px; font-weight: 800; margin-bottom: 8px; letter-spacing: -0.5px; }
-        p.sub { color: #94a3b8; font-size: 14px; margin-bottom: 28px; }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-            margin-bottom: 28px;
-        }
-        .stat-box {
-            background: rgba(30, 41, 59, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            padding: 16px;
-            border-radius: 16px;
-        }
-        .stat-val { font-size: 20px; font-weight: 700; color: #38bdf8; font-family: 'JetBrains Mono', monospace; }
-        .stat-lbl { font-size: 12px; color: #64748b; margin-top: 4px; text-transform: uppercase; font-weight: 600; }
-        .form-group {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            text-align: left;
-        }
+        body { font-family: system-ui, -apple-system, sans-serif; background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .card { background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(255,255,255,0.1); border-radius: 24px; max-width: 480px; width: 100%; padding: 34px 26px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7); text-align: center; }
+        .badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; font-size: 13px; font-weight: 700; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; background: ${statusColor}; box-shadow: 0 0 12px ${statusColor}; }
+        h1 { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
+        p.sub { color: #94a3b8; font-size: 14px; margin-bottom: 22px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
+        .stat-box { background: rgba(30,41,59,0.7); border: 1px solid rgba(255,255,255,0.06); padding: 14px 8px; border-radius: 14px; }
+        .stat-val { font-size: 17px; font-weight: 700; color: #38bdf8; font-family: monospace; }
+        .stat-lbl { font-size: 11px; color: #64748b; margin-top: 4px; text-transform: uppercase; font-weight: 600; }
+        .form-group { display: flex; flex-direction: column; gap: 10px; text-align: left; }
         label { font-size: 13px; font-weight: 600; color: #cbd5e1; }
-        input {
-            width: 100%;
-            padding: 14px 16px;
-            border-radius: 14px;
-            background: rgba(15, 23, 42, 0.9);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            color: #fff;
-            font-size: 15px;
-            font-family: 'JetBrains Mono', monospace;
-            outline: none;
-            transition: all 0.2s;
-        }
-        input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2); }
-        button {
-            width: 100%;
-            padding: 14px;
-            border-radius: 14px;
-            background: linear-gradient(135deg, #0284c7, #2563eb);
-            color: white;
-            font-size: 15px;
-            font-weight: 700;
-            border: none;
-            cursor: pointer;
-            transition: all 0.2s;
-            margin-top: 6px;
-        }
-        button:hover { opacity: 0.95; transform: translateY(-1px); }
+        input { width: 100%; padding: 13px 15px; border-radius: 12px; background: #0f172a; border: 1px solid rgba(255,255,255,0.15); color: #fff; font-size: 15px; font-family: monospace; outline: none; }
+        input:focus { border-color: #38bdf8; }
+        button { width: 100%; padding: 14px; border-radius: 12px; background: linear-gradient(135deg, #0284c7, #2563eb); color: #fff; font-size: 15px; font-weight: 700; border: none; cursor: pointer; margin-top: 4px; }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .code-box {
-            display: none;
-            margin-top: 20px;
-            padding: 18px;
-            background: rgba(34, 197, 94, 0.1);
-            border: 1px solid rgba(34, 197, 94, 0.3);
-            border-radius: 16px;
-        }
-        .code-val {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 32px;
-            font-weight: 800;
-            letter-spacing: 4px;
-            color: #4ade80;
-            margin: 8px 0;
-        }
-        .footer { margin-top: 28px; font-size: 12px; color: #475569; }
+        .code-box { display: none; margin-top: 18px; padding: 16px; background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); border-radius: 14px; }
+        .code-val { font-family: monospace; font-size: 30px; font-weight: 800; letter-spacing: 3px; color: #4ade80; margin: 8px 0; }
+        .footer { margin-top: 22px; font-size: 12px; color: #64748b; }
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="badge">
-            <span class="dot"></span>
-            <span>${statusText}</span>
-        </div>
-        <h1>⚡ ${BOT_NAME}</h1>
-        <p class="sub">24/7 Zero-Sleep WhatsApp Bot for Heroku</p>
-
+        <div class="badge"><span class="dot"></span><span>${statusText}</span></div>
+        <h1>⚡ ${botNameHtml}</h1>
+        <p class="sub">Baileys v7 &bull; ${totalCmds}+ Commands &bull; Zero-Sleep</p>
         <div class="stats-grid">
-            <div class="stat-box">
-                <div class="stat-val">${memMb} MB</div>
-                <div class="stat-lbl">RAM (Budget 512M)</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-val">${uptimeStr}</div>
-                <div class="stat-lbl">Uptime</div>
-            </div>
+            <div class="stat-box"><div class="stat-val">${memMb}M</div><div class="stat-lbl">RAM</div></div>
+            <div class="stat-box"><div class="stat-val">${uptimeStr}</div><div class="stat-lbl">Uptime</div></div>
+            <div class="stat-box"><div class="stat-val">${totalCmds}+</div><div class="stat-lbl">Commands</div></div>
         </div>
-
         <div class="form-group">
-            <label for="phone">Enter WhatsApp Number with Country Code:</label>
-            <input type="tel" id="phone" placeholder="923438673242" value="${OWNER_NUMBER}">
+            <label for="phone">WhatsApp Number with Country Code:</label>
+            <input type="tel" id="phone" placeholder="923438673242" value="${ownerNumberHtml}">
             <button id="btnPair" onclick="getPairingCode()">🔗 Get WhatsApp Pairing Code</button>
         </div>
-
         <div class="code-box" id="codeBox">
             <div style="font-size: 13px; color: #94a3b8;">Enter this code on your phone:</div>
             <div class="code-val" id="codeDisplay">----</div>
-            <div style="font-size: 12px; color: #cbd5e1;">WhatsApp > Linked Devices > Link with Phone Number</div>
+            <div style="font-size: 12px; color: #cbd5e1;">WhatsApp &gt; Linked Devices &gt; Link with Phone Number</div>
         </div>
-
-        <div class="footer">
-            Built with ❤️ by ${OWNER_NAME} &bull; Heroku 24/7 Zero-Sleep
-        </div>
+        <div class="footer">Built by ${ownerNameHtml} &bull; Heroku 24/7 Engine</div>
     </div>
-
     <script>
         async function getPairingCode() {
             const phone = document.getElementById('phone').value.trim();
             const btn = document.getElementById('btnPair');
             const codeBox = document.getElementById('codeBox');
             const codeDisplay = document.getElementById('codeDisplay');
-
             if (!phone) return alert('Please enter phone number!');
             btn.disabled = true;
             btn.innerText = 'Generating code...';
-
             try {
                 const res = await fetch('/pair?number=' + encodeURIComponent(phone));
                 const data = await res.json();
@@ -1023,7 +894,7 @@ app.get('/', (req, res) => {
                     codeBox.style.display = 'block';
                     btn.innerText = '✅ Code Generated!';
                 } else {
-                    alert('Error: ' + (data.error || 'Failed to generate code'));
+                    alert(data.error || 'Failed to generate code');
                     btn.disabled = false;
                     btn.innerText = '🔗 Get WhatsApp Pairing Code';
                 }
@@ -1039,42 +910,26 @@ app.get('/', (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════
-// 5. SYSTEM HELPERS & BOOTSTRAP
+// 5. BOOTSTRAP
 // ═════════════════════════════════════════════════════════════
 
-function getMemoryUsageMb() {
-    return Math.round(process.memoryUsage().rss / (1024 * 1024));
-}
-
-function formatUptime(seconds) {
-    const d = Math.floor(seconds / (3600 * 24));
-    const h = Math.floor((seconds % (3600 * 24)) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    if (d > 0) return `${d}d ${h}h ${m}m`;
-    if (h > 0) return `${h}h ${m}m`;
-    return `${m}m ${s}s`;
-}
-
-// Start Server & WhatsApp Engine
 app.listen(PORT, async () => {
+    await initMongo().catch(() => {});
+    await configStore.loadConfig().catch(() => {});
+
+    const cfg = configStore.getConfig();
     console.log(`\n======================================================`);
-    console.log(`⚡ ${BOT_NAME} IS RUNNING ON PORT ${PORT}`);
-    console.log(`🌐 Web UI: http://localhost:${PORT}`);
-    console.log(`💾 Initial RAM Footprint: ${getMemoryUsageMb()} MB / 512 MB`);
+    console.log(`⚡ ${cfg.botName} v2.0 RUNNING ON PORT ${PORT}`);
+    console.log(`🛠️ Loaded Commands: ${registry.getAllCommands().length} across 6 categories`);
+    console.log(`💾 Initial RAM: ${getMemoryUsageMb()} MB / 512 MB`);
     console.log(`======================================================\n`);
 
-    // 1. Restore session from MongoDB Atlas if present
-    const hasRestored = await restoreSessionFromCloud();
-
-    // 2. If valid credentials exist, auto-connect immediately
+    await restoreSessionFromCloud();
     const credsFile = path.join(SESSION_DIR, 'creds.json');
     if (fs.existsSync(credsFile)) {
-        console.log('🔑 [Auth] Found valid credentials. Connecting to WhatsApp...');
-        initWhatsApp().catch(err => {
-            console.error('❌ [Auto-Connect Error]:', err.message);
-        });
+        console.log('🔑 [Auth] Valid credentials detected. Connecting to WhatsApp...');
+        initWhatsApp().catch((err) => console.error('❌ [Auto-Connect Error]:', err.message));
     } else {
-        console.log('ℹ️ [Auth] No active session. Open the web page to enter phone number and pair.');
+        console.log('ℹ️ [Auth] No active session yet. Open Web Dashboard to pair.');
     }
 });

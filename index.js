@@ -191,12 +191,26 @@ function filterLeanSessionFiles(filenames) {
     return new Set([...creds, ...appState, ...preKeys, ...senderKeys, ...chatSessions, ...identityKeys]);
 }
 
+function isRegisteredCredsJson(rawStr) {
+    try {
+        const parsed = JSON.parse(String(rawStr || '{}'));
+        return Boolean(parsed && parsed.registered === true && parsed.me?.id);
+    } catch (_) {
+        return false;
+    }
+}
+
 async function restoreSessionFromCloud(force = false) {
     try {
         const credsFile = path.join(SESSION_DIR, 'creds.json');
         if (!force && fs.existsSync(credsFile)) {
-            console.log('📂 [Session] Local session found on disk.');
-            return true;
+            const rawLocal = await fs.readFile(credsFile, 'utf8').catch(() => '');
+            if (isRegisteredCredsJson(rawLocal)) {
+                console.log('📂 [Session] Local registered session found on disk.');
+                return true;
+            }
+            console.log('🧹 [Session] Removing incomplete/unregistered local creds.json...');
+            await fs.emptyDir(SESSION_DIR).catch(() => {});
         }
         const db = await initMongo();
         if (!db) return false;
@@ -213,7 +227,10 @@ async function restoreSessionFromCloud(force = false) {
         else buffer = Buffer.from(doc.data, 'base64');
 
         const filesMap = JSON.parse(zlib.gunzipSync(buffer).toString('utf8'));
-        if (!filesMap['creds.json']) return false;
+        if (!filesMap['creds.json'] || !isRegisteredCredsJson(filesMap['creds.json'])) {
+            console.log('ℹ️ [Session] Ignoring unregistered cloud backup; waiting for fresh pair.');
+            return false;
+        }
 
         await fs.ensureDir(SESSION_DIR);
         for (const [filename, content] of Object.entries(filesMap)) {
@@ -234,6 +251,8 @@ async function executeCloudBackupNow() {
     try {
         const credsFile = path.join(SESSION_DIR, 'creds.json');
         if (!fs.existsSync(credsFile)) return false;
+        const rawCreds = await fs.readFile(credsFile, 'utf8').catch(() => '');
+        if (!isRegisteredCredsJson(rawCreds)) return false;
 
         const allFiles = await fs.readdir(SESSION_DIR);
         const leanSet = filterLeanSessionFiles(allFiles);
@@ -956,10 +975,11 @@ app.listen(PORT, async () => {
 
     await restoreSessionFromCloud();
     const credsFile = path.join(SESSION_DIR, 'creds.json');
-    if (fs.existsSync(credsFile)) {
-        console.log('🔑 [Auth] Valid credentials detected. Connecting to WhatsApp...');
+    const localCredsRaw = fs.existsSync(credsFile) ? await fs.readFile(credsFile, 'utf8').catch(() => '') : '';
+    if (isRegisteredCredsJson(localCredsRaw)) {
+        console.log('🔑 [Auth] Valid registered credentials detected. Connecting to WhatsApp...');
         initWhatsApp().catch((err) => console.error('❌ [Auto-Connect Error]:', err.message));
     } else {
-        console.log('ℹ️ [Auth] No active session yet. Open Web Dashboard to pair.');
+        console.log('ℹ️ [Auth] No registered session yet. Open Web Dashboard to pair.');
     }
 });

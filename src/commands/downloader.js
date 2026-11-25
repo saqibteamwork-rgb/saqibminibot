@@ -295,10 +295,26 @@ const commands = [
             const url = ctx.args[0];
             if (!url || !url.includes('capcut.com')) return ctx.reply(`Usage: *${ctx.prefix}capcut <capcut link>*`);
             await ctx.react('⏳');
-            const res = await axios.get(`https://backend1.tioo.eu.org/capcut?url=${encodeURIComponent(url)}`, { timeout: 15000, headers: { 'User-Agent': UA } });
-            const vid = res.data?.originalVideoUrl || res.data?.video_url || res.data?.result?.video;
+            let vid = null;
+            let title = 'CapCut Template';
+            const apis = [
+                `https://api.ryzendesu.vip/api/downloader/capcut?url=${encodeURIComponent(url)}`,
+                `https://backend1.tioo.eu.org/capcut?url=${encodeURIComponent(url)}`
+            ];
+            for (const api of apis) {
+                try {
+                    const res = await axios.get(api, { timeout: 12000, headers: { 'User-Agent': UA } });
+                    const d = res.data || {};
+                    const cand = d.videoUrl || d.originalVideoUrl || d.video_url || d.result?.video || d.data?.url;
+                    if (cand) {
+                        vid = cand;
+                        title = d.title || d.result?.title || title;
+                        break;
+                    }
+                } catch (_) {}
+            }
             if (!vid) throw new Error('CapCut video nahi mili.');
-            await ctx.sock.sendMessage(ctx.from, { video: { url: vid }, caption: `🎬 *CapCut:* ${res.data?.title || 'Template'}` }, ctx.quoteOpt);
+            await ctx.sock.sendMessage(ctx.from, { video: { url: vid }, caption: `🎬 *CapCut:* ${title}` }, ctx.quoteOpt);
             await ctx.react('✅');
         }
     },
@@ -311,20 +327,38 @@ const commands = [
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}apk WhatsApp*`);
             await ctx.react('⏳');
             let apkData = null;
-            const endpoints = [
-                `https://api.princetechn.com/api/download/apkdl?apikey=prince&appName=${encodeURIComponent(ctx.fullArgs)}`,
-                `https://bk9.fun/download/apk?q=${encodeURIComponent(ctx.fullArgs)}`
-            ];
-            for (const ep of endpoints) {
-                try {
-                    const r = await axios.get(ep, { timeout: 12000 });
-                    const d = r.data?.result || r.data?.BK9;
-                    if (d?.dllink) {
-                        apkData = d;
-                        break;
-                    }
-                } catch (_) {}
+
+            // Tier 1: Aptoide official search JSON API (fast & reliable)
+            try {
+                const r = await axios.get(`https://ws75.aptoide.com/api/7/apps/search?query=${encodeURIComponent(ctx.fullArgs)}&limit=1`, { timeout: 12000, headers: { 'User-Agent': UA } });
+                const app = r.data?.datalist?.list?.[0];
+                if (app?.file?.path) {
+                    apkData = {
+                        name: app.name || ctx.fullArgs,
+                        package: app.package || 'android',
+                        size: formatBytes(app.file.filesize || 0),
+                        dllink: app.file.path
+                    };
+                }
+            } catch (_) {}
+
+            // Tier 2: Fallback APK APIs
+            if (!apkData) {
+                for (const ep of [
+                    `https://api.princetechn.com/api/download/apkdl?apikey=prince&appName=${encodeURIComponent(ctx.fullArgs)}`,
+                    `https://bk9.fun/download/apk?q=${encodeURIComponent(ctx.fullArgs)}`
+                ]) {
+                    try {
+                        const r = await axios.get(ep, { timeout: 10000 });
+                        const d = r.data?.result || r.data?.BK9;
+                        if (d?.dllink) {
+                            apkData = d;
+                            break;
+                        }
+                    } catch (_) {}
+                }
             }
+
             if (!apkData?.dllink) return ctx.reply(`❌ APK nahi mili: *${ctx.fullArgs}*`);
             await ctx.sock.sendMessage(ctx.from, {
                 document: { url: apkData.dllink },

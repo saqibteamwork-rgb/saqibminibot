@@ -386,6 +386,36 @@ async function initWhatsApp(pairingNumber = null) {
                 delete options.quoted;
             }
 
+            // Attach WhatsApp "Forwarded / View Channel" newsletter pill on replies & media
+            const cfg = configStore.getConfig();
+            const isNewsletterDest = targetJid && targetJid.endsWith('@newsletter');
+            const isStatusDest = targetJid === 'status@broadcast';
+            const supportsChannelCard = Boolean(
+                content &&
+                typeof content === 'object' &&
+                !content.react &&
+                !content.delete &&
+                !content.poll &&
+                !content.edit &&
+                (content.text !== undefined || content.image || content.video || content.audio || content.document)
+            );
+            if (cfg.channelCardEnabled && cfg.newsletterJid && !isNewsletterDest && !isStatusDest && supportsChannelCard) {
+                const existingCtx = (content.contextInfo && typeof content.contextInfo === 'object') ? content.contextInfo : {};
+                content = {
+                    ...content,
+                    contextInfo: {
+                        forwardingScore: 999,
+                        isForwarded: true,
+                        forwardedNewsletterMessageInfo: {
+                            newsletterJid: cfg.newsletterJid,
+                            newsletterName: cfg.newsletterName || cfg.botName || 'Mr SAQIB',
+                            serverMessageId: 1
+                        },
+                        ...existingCtx
+                    }
+                };
+            }
+
             const sentMsg = await rawSendMessage(jid, content, options);
             cacheMessage(sentMsg);
             return sentMsg;

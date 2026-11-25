@@ -112,9 +112,23 @@ const commands = [
             } else {
                 return ctx.reply(`Usage: *${ctx.prefix}tr ur Hello friend!* ya kisi message par reply karke *${ctx.prefix}tr ur* likhein.`);
             }
-            const { data } = await axios.get(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(lang)}&dt=t&q=${encodeURIComponent(text)}`, { timeout: 10000 });
-            const out = (data?.[0] || []).map((chunk) => chunk?.[0] || '').join('').trim();
-            if (!out) throw new Error('Translation fail ho gayi.');
+            let out = '';
+            // Tier 1: Google Translate
+            try {
+                const { data } = await axios.get(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(lang)}&dt=t&q=${encodeURIComponent(text)}`, { timeout: 9000 });
+                out = (data?.[0] || []).map((chunk) => chunk?.[0] || '').join('').trim();
+            } catch (_) {}
+
+            // Tier 2: MyMemory fallback
+            if (!out) {
+                try {
+                    const pair = lang === 'en' ? 'ur|en' : `en|${lang}`;
+                    const { data } = await axios.get(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(pair)}`, { timeout: 9000 });
+                    out = data?.responseData?.translatedText || '';
+                } catch (_) {}
+            }
+
+            if (!out) throw new Error('Translation service abhi busy hai.');
             await ctx.reply(`🌐 *TRANSLATION (${lang.toUpperCase()}):*\n\n${out}`);
         }
     },
@@ -167,7 +181,10 @@ const commands = [
         desc: 'Wikipedia summary search karein',
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}wiki Pakistan*`);
-            const { data } = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(ctx.fullArgs)}`, { timeout: 10000 });
+            const { data } = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(ctx.fullArgs)}`, {
+                timeout: 10000,
+                headers: { 'User-Agent': 'MiniBot/2.0 (https://github.com/saqibteamwork-rgb/saqibminobot)' }
+            });
             if (!data?.extract) return ctx.reply('❌ Wikipedia par article nahi mila.');
             await ctx.reply(`📚 *WIKIPEDIA: ${data.title}*\n\n${data.extract}\n\n🔗 ${data.content_urls?.desktop?.page || ''}`);
         }
@@ -373,6 +390,15 @@ const commands = [
         category: 'tools',
         desc: 'Random English clean joke',
         handler: async (ctx) => {
+            try {
+                const { data } = await axios.get('https://v2.jokeapi.dev/joke/Programming,Misc?safe-mode', { timeout: 8000 });
+                if (data?.setup && data?.delivery) {
+                    return await ctx.reply(`😂 *${data.setup}*\n\n👉 _${data.delivery}_`);
+                }
+                if (data?.joke) {
+                    return await ctx.reply(`😂 ${data.joke}`);
+                }
+            } catch (_) {}
             const { data } = await axios.get('https://official-joke-api.appspot.com/random_joke', { timeout: 8000 });
             await ctx.reply(`😂 *${data.setup}*\n\n👉 _${data.punchline}_`);
         }

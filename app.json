@@ -30,6 +30,16 @@
       "description": "Phone number of bot owner (e.g. 923438673242)",
       "required": false,
       "value": "923438673242"
+    },
+    "NEWSLETTER_JID": {
+      "description": "WhatsApp Channel JID for the View Channel forward badge (e.g. 120363431913895899@newsletter)",
+      "required": false,
+      "value": "120363431913895899@newsletter"
+    },
+    "CHANNEL_NAME": {
+      "description": "Channel title displayed on View Channel forward badge",
+      "required": false,
+      "value": "Mr SAQIB"
     }
   },
   "formation": {

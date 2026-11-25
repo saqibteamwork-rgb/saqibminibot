@@ -399,6 +399,61 @@ const commands = [
                 `\n\nCommands: \`add <link>\` | \`del <jid>\` | \`run\``
             );
         }
+    },
+    {
+        name: 'setchannel',
+        aliases: ['setnewsletter', 'viewchannel'],
+        category: 'channel',
+        desc: 'Bot replies ke neeche "View Channel" forward card channel set karein (Owner)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            if (!ctx.fullArgs) {
+                return ctx.reply(
+                    `📢 *CURRENT VIEW-CHANNEL CARD:*\n` +
+                    `• *Channel Name:* ${cfg.newsletterName}\n` +
+                    `• *Newsletter JID:* \`${cfg.newsletterJid}\`\n` +
+                    `• *Status:* ${cfg.channelCardEnabled ? 'ON' : 'OFF'}\n\n` +
+                    `Usage:\n` +
+                    `• *${ctx.prefix}setchannel <channel-link | @newsletter JID>*\n` +
+                    `• *${ctx.prefix}setchannel <link> | Custom Name*\n` +
+                    `• *${ctx.prefix}channelcard on/off*`
+                );
+            }
+            const [targetPart, customName] = splitPipeArgs(ctx.fullArgs);
+            const info = await resolveChannelTarget(ctx.sock, targetPart || ctx.args[0], ctx.msg);
+            if (!info?.jid) return ctx.reply(`❌ Valid WhatsApp Channel link ya \`@newsletter\` JID dein (ya channel post par reply karein).`);
+            const nameToSet = customName || info.name || cfg.newsletterName;
+            configStore.updateConfig({
+                newsletterJid: info.jid,
+                newsletterName: nameToSet,
+                channelCardEnabled: true
+            });
+            await ctx.reply(
+                `✅ *View Channel Forward Card Updated!*\n` +
+                `📛 *Channel:* ${nameToSet}\n` +
+                `🆔 *JID:* \`${info.jid}\`\n\n` +
+                `_Ab har reply ke neeche aapka "View channel" pill dikhega!_`
+            );
+        }
+    },
+    {
+        name: 'channelcard',
+        aliases: ['viewcard', 'nlcard'],
+        category: 'channel',
+        desc: 'Messages ke neeche "View Channel" forward card ON/OFF karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const sub = (ctx.args[0] || '').toLowerCase();
+            const cfg = configStore.getConfig();
+            if (!['on', 'off'].includes(sub)) {
+                return ctx.reply(`📢 *View Channel Card:* ${cfg.channelCardEnabled ? 'ON' : 'OFF'}\nChannel: *${cfg.newsletterName}* (\`${cfg.newsletterJid}\`)`);
+            }
+            configStore.updateConfig({ channelCardEnabled: sub === 'on' });
+            await ctx.reply(`✅ View Channel Forward Card ab *${sub.toUpperCase()}* hai.`);
+        }
     }
 ];
 

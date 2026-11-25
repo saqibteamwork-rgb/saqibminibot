@@ -21,6 +21,9 @@ function getDefaultConfig() {
     return {
         botName: process.env.BOT_NAME || 'MINI BOT MD',
         ownerName: process.env.OWNER_NAME || 'MR SAQIB',
+        newsletterJid: process.env.NEWSLETTER_JID || process.env.NEWSLETTER_ID || '120363431913895899@newsletter',
+        newsletterName: process.env.CHANNEL_NAME || 'Mr SAQIB',
+        channelCardEnabled: true,
         prefix: '.',
         mode: 'public', // public | private | self
         owners: envOwner ? [envOwner] : [],
@@ -55,6 +58,9 @@ function mergeWithDefaults(raw) {
     return {
         botName: (typeof raw?.botName === 'string' && raw.botName.trim()) ? raw.botName.trim() : def.botName,
         ownerName: (typeof raw?.ownerName === 'string' && raw.ownerName.trim()) ? raw.ownerName.trim() : def.ownerName,
+        newsletterJid: (typeof raw?.newsletterJid === 'string' && raw.newsletterJid.endsWith('@newsletter')) ? raw.newsletterJid.trim() : def.newsletterJid,
+        newsletterName: (typeof raw?.newsletterName === 'string' && raw.newsletterName.trim()) ? raw.newsletterName.trim() : def.newsletterName,
+        channelCardEnabled: raw?.channelCardEnabled === undefined ? def.channelCardEnabled : Boolean(raw.channelCardEnabled),
         prefix: (typeof raw?.prefix === 'string' && raw.prefix.length > 0 && raw.prefix.length <= 3) ? raw.prefix : def.prefix,
         mode: ['public', 'private', 'self'].includes(raw?.mode) ? raw.mode : def.mode,
         owners: Array.from(ownersSet),

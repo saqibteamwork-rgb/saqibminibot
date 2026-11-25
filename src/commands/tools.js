@@ -8,11 +8,7 @@ const crypto = require('crypto');
 const { httpClient, withTtlCache, isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid } = require('../mediaHelper');
 
 let _QRCode = null;
-let _googleTTS = null;
-let _moment = null;
 const getQR = () => (_QRCode || (_QRCode = require('qrcode')));
-const getTTS = () => (_googleTTS || (_googleTTS = require('google-tts-api')));
-const getMoment = () => (_moment || (_moment = require('moment-timezone')));
 
 // Safe pure arithmetic expression evaluator (ZERO eval / new Function!)
 function safeMathEval(expr) {
@@ -154,7 +150,7 @@ const commands = [
                 lang = ctx.args[0].toLowerCase();
                 text = ctx.args.slice(1).join(' ');
             }
-            const url = getTTS().getAudioUrl(text.slice(0, 200), { lang, slow: false, host: 'https://translate.google.com' });
+            const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.slice(0, 200))}&tl=${encodeURIComponent(lang)}&total=1&idx=0&textlen=${text.slice(0, 200).length}&client=tw-ob`;
             await ctx.sock.sendMessage(ctx.from, { audio: { url }, mimetype: 'audio/mp4', ptt: true }, ctx.quoteOpt);
         }
     },
@@ -266,11 +262,13 @@ const commands = [
         category: 'tools',
         desc: 'Kisi city ya country timezone ka live waqt dekhein',
         handler: async (ctx) => {
-            const q = (ctx.fullArgs || 'Asia/Karachi').trim();
-            const moment = getMoment();
-            const matched = moment.tz.names().find((z) => z.toLowerCase().includes(q.toLowerCase())) || 'Asia/Karachi';
-            const now = moment().tz(matched);
-            await ctx.reply(`🕰️ *WORLD CLOCK*\n📍 *Zone:* ${matched}\n📅 *Date:* ${now.format('dddd, DD MMM YYYY')}\n⏰ *Time:* ${now.format('hh:mm:ss A')}`);
+            const q = (ctx.fullArgs || 'Asia/Karachi').trim().toLowerCase();
+            const zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : ['Asia/Karachi'];
+            const matched = zones.find((z) => z.toLowerCase().includes(q)) || 'Asia/Karachi';
+            const now = new Date();
+            const dateStr = new Intl.DateTimeFormat('en-US', { timeZone: matched, weekday: 'long', year: 'numeric', month: 'short', day: '2-digit' }).format(now);
+            const timeStr = new Intl.DateTimeFormat('en-US', { timeZone: matched, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(now);
+            await ctx.reply(`🕰️ *WORLD CLOCK*\n📍 *Zone:* ${matched}\n📅 *Date:* ${dateStr}\n⏰ *Time:* ${timeStr}`);
         }
     },
     {

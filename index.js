@@ -804,7 +804,7 @@ setInterval(() => {
 
 setInterval(() => {
     const memMb = getMemoryUsageMb();
-    if (memMb > 180) {
+    if (memMb > 130) {
         trimCaches();
         if (global.gc) {
             try { global.gc(); } catch (_) {}

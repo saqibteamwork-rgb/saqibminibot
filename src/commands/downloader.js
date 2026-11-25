@@ -10,10 +10,8 @@ const https = require('https');
 const configStore = require('../configStore');
 const { httpClient, withTtlCache, extractMedia, isSafePublicHttpUrl, formatBytes, sleep } = require('../mediaHelper');
 
-let _cheerio = null;
 let _yts = null;
 let _ytdl = null;
-const getCheerio = () => (_cheerio || (_cheerio = require('cheerio')));
 const getYts = () => (_yts || (_yts = require('yt-search')));
 const getYtdl = () => (_ytdl || (_ytdl = require('ytdl-lite')));
 
@@ -241,10 +239,12 @@ async function runIg(ctx) {
                 timeout: 8000
             });
             if (sr.data?.status === 'ok' && sr.data?.data) {
-                const $ = getCheerio().load(sr.data.data);
-                const dl = $('.download-items__btn a').first().attr('href');
+                const html = String(sr.data.data);
+                const btnMatch = html.match(/class=["'][^"']*download-items__btn[^"']*["'][\s\S]*?<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i)
+                    || html.match(/<a[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*title=["'][^"']*Download/i);
+                const dl = btnMatch?.[1]?.replace(/&amp;/g, '&');
                 if (dl) {
-                    const isVid = /\.(mp4|mov|webm)/i.test(dl) || $('.download-items__btn a').first().text().toLowerCase().includes('video');
+                    const isVid = /\.(mp4|mov|webm)/i.test(dl) || /video/i.test(btnMatch?.[2] || '');
                     await ctx.sock.sendMessage(ctx.from, isVid ? { video: { url: dl }, caption: '📸 *Instagram Video*' } : { image: { url: dl }, caption: '📸 *Instagram Photo*' }, ctx.quoteOpt);
                     return await ctx.react('✅');
                 }
@@ -390,10 +390,15 @@ const commands = [
             if (!url || !isSafePublicHttpUrl(url) || !url.includes('mediafire.com')) return ctx.reply(`Usage: *${ctx.prefix}mf <mediafire link>*`);
             ctx.react('⏳');
             const res = await httpClient.get(url, { timeout: 10000, headers: { 'User-Agent': UA } });
-            const $ = getCheerio().load(res.data);
-            const dl = $('#downloadButton').attr('href');
-            const name = $('.dl-info .promo_ss_file_name').text().trim() || 'mediafire_file';
-            const size = $('.dl-info .promo_ss_file_size').text().trim() || 'Unknown';
+            const html = String(res.data || '');
+            const dlMatch = html.match(/id=["']downloadButton["'][^>]*href=["']([^"']+)["']/i)
+                || html.match(/href=["']([^"']+)["'][^>]*id=["']downloadButton["']/i);
+            const dl = dlMatch?.[1];
+            const nameMatch = html.match(/class=["'][^"']*promo_ss_file_name[^"']*["'][^>]*>([^<]+)</i)
+                || html.match(/class=["'][^"']*dl-btn-label[^"']*["'][^>]*title=["']([^"']+)["']/i);
+            const sizeMatch = html.match(/class=["'][^"']*promo_ss_file_size[^"']*["'][^>]*>([^<]+)</i);
+            const name = nameMatch?.[1]?.trim() || 'mediafire_file';
+            const size = sizeMatch?.[1]?.trim() || 'Unknown';
             if (!dl) throw new Error('Direct download link nahi mila.');
             await ctx.sock.sendMessage(ctx.from, { document: { url: dl }, mimetype: 'application/octet-stream', fileName: name, caption: `📁 *MediaFire:* ${name} (${size})` }, ctx.quoteOpt);
             ctx.react('✅');

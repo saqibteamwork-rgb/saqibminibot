@@ -4,9 +4,51 @@
  * MINI BOT MD :: Shared Baileys v7 JID, Unwrap, Media, Channel & Security Helpers
  */
 
+const http = require('http');
+const https = require('https');
 const net = require('net');
+const axios = require('axios');
 const { downloadContentFromMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const { normalizeDigits } = require('./configStore');
+
+// Persistent Keep-Alive HTTP client (reuses TCP/TLS sockets for faster API calls)
+const httpClient = axios.create({
+    timeout: 10000,
+    httpAgent: new http.Agent({ keepAlive: true, maxSockets: 25 }),
+    httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 25 })
+});
+
+const ttlCache = new Map();
+
+function getTtlCached(key) {
+    const item = ttlCache.get(key);
+    if (!item) return undefined;
+    if (Date.now() > item.exp) {
+        ttlCache.delete(key);
+        return undefined;
+    }
+    return item.val;
+}
+
+function setTtlCached(key, val, ttlMs = 300000) {
+    if (ttlCache.size >= 200) {
+        const oldest = ttlCache.keys().next().value;
+        ttlCache.delete(oldest);
+    }
+    ttlCache.set(key, { val, exp: Date.now() + ttlMs });
+    return val;
+}
+
+async function withTtlCache(key, ttlMs, loader) {
+    const hit = getTtlCached(key);
+    if (hit !== undefined) return hit;
+    const val = await loader();
+    return setTtlCached(key, val, ttlMs);
+}
+
+function clearTtlCache() {
+    ttlCache.clear();
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -362,6 +404,11 @@ function formatUptime(seconds) {
 module.exports = {
     sleep,
     withTimeout,
+    httpClient,
+    getTtlCached,
+    setTtlCached,
+    withTtlCache,
+    clearTtlCache,
     escapeHtml,
     unwrapMessage,
     getContextInfo,

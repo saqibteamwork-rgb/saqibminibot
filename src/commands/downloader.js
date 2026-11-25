@@ -5,17 +5,20 @@
  * Uses pure JS + streaming URL payloads to stay well within Heroku 512MB RAM.
  */
 
-const axios = require('axios');
-const cheerio = require('cheerio');
 const crypto = require('crypto');
 const https = require('https');
-const yts = require('yt-search');
-const ytdl = require('ytdl-lite');
 const configStore = require('../configStore');
-const { extractMedia, isSafePublicHttpUrl, formatBytes, sleep } = require('../mediaHelper');
+const { httpClient, withTtlCache, extractMedia, isSafePublicHttpUrl, formatBytes, sleep } = require('../mediaHelper');
+
+let _cheerio = null;
+let _yts = null;
+let _ytdl = null;
+const getCheerio = () => (_cheerio || (_cheerio = require('cheerio')));
+const getYts = () => (_yts || (_yts = require('yt-search')));
+const getYtdl = () => (_ytdl || (_ytdl = require('ytdl-lite')));
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const tlsAgent = new https.Agent({ rejectUnauthorized: false });
+const tlsAgent = new https.Agent({ keepAlive: true, rejectUnauthorized: false });
 
 function extractYtId(url) {
     const patterns = [
@@ -41,10 +44,10 @@ async function savetubeDownload(url, type = 'audio') {
         referer: 'https://save-tube.com/',
         'user-agent': UA
     };
-    const { data: cdnRes } = await axios.get('https://media.savetube.vip/api/random-cdn', { headers, timeout: 8000 });
+    const { data: cdnRes } = await httpClient.get('https://media.savetube.vip/api/random-cdn', { headers, timeout: 7000 });
     const cdn = cdnRes?.cdn;
     if (!cdn) return null;
-    const { data: infoRes } = await axios.post(`https://${cdn}/v2/info`, { url: `https://www.youtube.com/watch?v=${id}` }, { headers, timeout: 12000 });
+    const { data: infoRes } = await httpClient.post(`https://${cdn}/v2/info`, { url: `https://www.youtube.com/watch?v=${id}` }, { headers, timeout: 9000 });
     if (!infoRes?.data) return null;
 
     const raw = Buffer.from(infoRes.data, 'base64');
@@ -52,12 +55,12 @@ async function savetubeDownload(url, type = 'audio') {
     const decrypted = JSON.parse(Buffer.concat([decipher.update(raw.subarray(16)), decipher.final()]).toString());
 
     const isAudio = type === 'audio';
-    const { data: dl } = await axios.post(`https://${cdn}/download`, {
+    const { data: dl } = await httpClient.post(`https://${cdn}/download`, {
         id,
         downloadType: isAudio ? 'audio' : 'video',
         quality: isAudio ? '128' : '360',
         key: decrypted.key
-    }, { headers, timeout: 15000 });
+    }, { headers, timeout: 10000 });
     if (dl?.data?.downloadUrl) {
         return { url: dl.data.downloadUrl, title: decrypted.title || 'YouTube Media', thumb: `https://i.ytimg.com/vi/${id}/hqdefault.jpg` };
     }
@@ -69,74 +72,81 @@ async function resolveYoutubeMedia(queryOrUrl, type = 'audio') {
     let meta = { title: 'YouTube Media', duration: '', author: '', thumb: '' };
 
     if (!extractYtId(targetUrl)) {
-        const search = await yts(queryOrUrl);
-        if (!search?.videos?.length) throw new Error('Koi YouTube result nahi mila.');
-        const v = search.videos[0];
+        const v = await withTtlCache(`yts1:${queryOrUrl.toLowerCase()}`, 300000, async () => {
+            const search = await getYts()(queryOrUrl);
+            if (!search?.videos?.length) throw new Error('Koi YouTube result nahi mila.');
+            return search.videos[0];
+        });
         targetUrl = v.url;
         meta = { title: v.title, duration: v.timestamp, author: v.author?.name || '', thumb: v.thumbnail };
     }
 
-    // Tier 1: ytdl-lite
-    try {
-        const r = type === 'audio' ? await ytdl.ytmp3(targetUrl) : await ytdl.ytmp4(targetUrl, '360');
-        if (r?.url) return { ...meta, title: r.title || meta.title, url: r.url };
-    } catch (_) {}
+    return await withTtlCache(`yt:${type}:${targetUrl}`, 600000, async () => {
+        // Race fast primary tiers concurrently; fall back to SaveNow polling if needed
+        try {
+            return await Promise.any([
+                (async () => {
+                    const ytdl = getYtdl();
+                    const r = type === 'audio' ? await ytdl.ytmp3(targetUrl) : await ytdl.ytmp4(targetUrl, '360');
+                    if (!r?.url) throw new Error('no ytdl url');
+                    return { ...meta, title: r.title || meta.title, url: r.url };
+                })(),
+                (async () => {
+                    const r = await savetubeDownload(targetUrl, type);
+                    if (!r?.url) throw new Error('no savetube url');
+                    return { ...meta, title: r.title || meta.title, url: r.url, thumb: r.thumb || meta.thumb };
+                })(),
+                (async () => {
+                    const ep = `https://eliteprotech-apis.zone.id/ytdown?url=${encodeURIComponent(targetUrl)}&format=${type === 'audio' ? 'mp3' : 'mp4'}`;
+                    const res = await httpClient.get(ep, { timeout: 10000, headers: { 'User-Agent': UA } });
+                    if (!res.data?.downloadURL) throw new Error('no ep url');
+                    return { ...meta, title: res.data.title || meta.title, url: res.data.downloadURL };
+                })()
+            ]);
+        } catch (_) {}
 
-    // Tier 2: savetube AES CDN
-    try {
-        const r = await savetubeDownload(targetUrl, type);
-        if (r?.url) return { ...meta, title: r.title || meta.title, url: r.url, thumb: r.thumb || meta.thumb };
-    } catch (_) {}
-
-    // Tier 3: EliteProTech / Yupra fallback
-    try {
-        const ep = type === 'audio'
-            ? `https://eliteprotech-apis.zone.id/ytdown?url=${encodeURIComponent(targetUrl)}&format=mp3`
-            : `https://eliteprotech-apis.zone.id/ytdown?url=${encodeURIComponent(targetUrl)}&format=mp4`;
-        const res = await axios.get(ep, { timeout: 20000, headers: { 'User-Agent': UA } });
-        if (res.data?.downloadURL) return { ...meta, title: res.data.title || meta.title, url: res.data.downloadURL };
-    } catch (_) {}
-
-    // Tier 4: SaveNow polling fallback
-    try {
-        const fmt = type === 'audio' ? 'mp3' : '360';
-        const { data: init } = await axios.get('https://p.savenow.to/ajax/download.php', {
-            params: { copyright: 0, format: fmt, url: targetUrl, api: 'dfcb6d76f2f6a9894gjkege8a4ab232222' },
-            httpsAgent: tlsAgent,
-            timeout: 15000,
-            headers: { 'User-Agent': UA, Referer: 'https://savenow.to/' }
-        });
-        if (init?.progress_url) {
-            for (let i = 0; i < 10; i++) {
-                await sleep(1800);
-                const { data: p } = await axios.get(init.progress_url, { httpsAgent: tlsAgent, timeout: 10000 });
-                if (p?.download_url) return { ...meta, title: init.info?.title || meta.title, url: p.download_url };
-                if (p?.success === -1) break;
+        try {
+            const fmt = type === 'audio' ? 'mp3' : '360';
+            const { data: init } = await httpClient.get('https://p.savenow.to/ajax/download.php', {
+                params: { copyright: 0, format: fmt, url: targetUrl, api: 'dfcb6d76f2f6a9894gjkege8a4ab232222' },
+                httpsAgent: tlsAgent,
+                timeout: 10000,
+                headers: { 'User-Agent': UA, Referer: 'https://savenow.to/' }
+            });
+            if (init?.progress_url) {
+                for (let i = 0; i < 8; i++) {
+                    await sleep(1200);
+                    const { data: p } = await httpClient.get(init.progress_url, { httpsAgent: tlsAgent, timeout: 8000 });
+                    if (p?.download_url) return { ...meta, title: init.info?.title || meta.title, url: p.download_url };
+                    if (p?.success === -1) break;
+                }
             }
-        }
-    } catch (_) {}
+        } catch (_) {}
 
-    throw new Error('YouTube download server abhi busy hai, thodi der baad try karein.');
+        throw new Error('YouTube download server abhi busy hai, thodi der baad try karein.');
+    });
 }
 
 async function fetchTikWM(url) {
-    const res = await axios.get(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`, {
-        timeout: 12000,
-        headers: { 'User-Agent': UA }
+    return await withTtlCache(`tt:${url}`, 300000, async () => {
+        const res = await httpClient.get(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`, {
+            timeout: 9000,
+            headers: { 'User-Agent': UA }
+        });
+        if (res.data?.code === 0 && res.data?.data) {
+            const d = res.data.data;
+            let videoUrl = d.play || d.hdplay || d.wmplay || null;
+            if (videoUrl && videoUrl.startsWith('/')) videoUrl = `https://www.tikwm.com${videoUrl}`;
+            return {
+                videoUrl,
+                images: Array.isArray(d.images) ? d.images : null,
+                audioUrl: d.music || d.music_info?.play || null,
+                title: d.title || 'TikTok Video',
+                author: d.author?.nickname || 'TikTok'
+            };
+        }
+        throw new Error('TikTok media extract nahi ho saki.');
     });
-    if (res.data?.code === 0 && res.data?.data) {
-        const d = res.data.data;
-        let videoUrl = d.play || d.hdplay || d.wmplay || null;
-        if (videoUrl && videoUrl.startsWith('/')) videoUrl = `https://www.tikwm.com${videoUrl}`;
-        return {
-            videoUrl,
-            images: Array.isArray(d.images) ? d.images : null,
-            audioUrl: d.music || d.music_info?.play || null,
-            title: d.title || 'TikTok Video',
-            author: d.author?.nickname || 'TikTok'
-        };
-    }
-    throw new Error('TikTok media extract nahi ho saki.');
 }
 
 async function fetchSocialMedia(url) {
@@ -144,29 +154,31 @@ async function fetchSocialMedia(url) {
         'https://all-media-downloader-api.onrender.com',
         'https://all-media-downloader-api-0rts.onrender.com'
     ];
-    for (const base of servers) {
-        try {
-            const res = await axios.get(`${base}/api/download?url=${encodeURIComponent(url)}&api_key=m41nul`, { timeout: 18000 });
+    try {
+        return await Promise.any(servers.map(async (base) => {
+            const res = await httpClient.get(`${base}/api/download?url=${encodeURIComponent(url)}&api_key=m41nul`, { timeout: 12000 });
             if (res.data?.success && (res.data.video_url || res.data.hd || res.data.sd)) {
                 return {
                     url: res.data.hd || res.data.video_url || res.data.sd,
                     title: res.data.title || 'Media Download'
                 };
             }
-        } catch (_) {}
+            throw new Error('No media');
+        }));
+    } catch (_) {
+        throw new Error('Social downloader API se media nahi mili.');
     }
-    throw new Error('Social downloader API se media nahi mili.');
 }
 
 async function runPlay(ctx) {
     if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}play <song name or YouTube link>*`);
-    await ctx.react('🎵');
+    ctx.react('🎵');
     const r = await resolveYoutubeMedia(ctx.fullArgs, 'audio');
     if (r.thumb) {
-        await ctx.sock.sendMessage(ctx.from, { image: { url: r.thumb }, caption: `🎵 *${r.title}*\n⏳ ${r.duration || 'Audio'}\n📥 Sending MP3...` }, ctx.quoteOpt).catch(() => {});
+        ctx.sock.sendMessage(ctx.from, { image: { url: r.thumb }, caption: `🎵 *${r.title}*\n⏳ ${r.duration || 'Audio'}\n📥 Sending MP3...` }, ctx.quoteOpt).catch(() => {});
     }
     await ctx.sock.sendMessage(ctx.from, { audio: { url: r.url }, mimetype: 'audio/mpeg', fileName: `${r.title.slice(0, 40)}.mp3` }, ctx.quoteOpt);
-    await ctx.react('✅');
+    ctx.react('✅');
 }
 
 async function runVideo(ctx) {
@@ -219,17 +231,17 @@ async function runIg(ctx) {
     if (!url || !/(instagram\.com|instagr\.am)/i.test(url)) return ctx.reply(`Usage: *${ctx.prefix}ig <instagram reel/post link>*`);
     await ctx.react('⏳');
     try {
-        const home = await axios.get('https://saveinsta.to/en/highlights', { headers: { 'User-Agent': UA }, timeout: 8000 });
+        const home = await httpClient.get('https://saveinsta.to/en/highlights', { headers: { 'User-Agent': UA }, timeout: 7000 });
         const expMatch = home.data.match(/k_exp\s*=\s*["']([^"']+)["']/);
         const tokenMatch = home.data.match(/k_token\s*=\s*["']([^"']+)["']/);
         if (expMatch && tokenMatch) {
             const params = new URLSearchParams({ k_exp: expMatch[1], k_token: tokenMatch[1], q: url, t: 'media', lang: 'en', v: 'v2' });
-            const sr = await axios.post('https://saveinsta.to/api/ajaxSearch', params, {
+            const sr = await httpClient.post('https://saveinsta.to/api/ajaxSearch', params, {
                 headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://saveinsta.to', Referer: 'https://saveinsta.to/en/highlights' },
-                timeout: 10000
+                timeout: 8000
             });
             if (sr.data?.status === 'ok' && sr.data?.data) {
-                const $ = cheerio.load(sr.data.data);
+                const $ = getCheerio().load(sr.data.data);
                 const dl = $('.download-items__btn a').first().attr('href');
                 if (dl) {
                     const isVid = /\.(mp4|mov|webm)/i.test(dl) || $('.download-items__btn a').first().text().toLowerCase().includes('video');
@@ -275,8 +287,10 @@ const commands = [
         desc: 'YouTube par top 5 videos search karein',
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}yts <search topic>*`);
-            const res = await yts(ctx.fullArgs);
-            const vids = (res?.videos || []).slice(0, 5);
+            const vids = await withTtlCache(`yts5:${ctx.fullArgs.toLowerCase()}`, 300000, async () => {
+                const res = await getYts()(ctx.fullArgs);
+                return (res?.videos || []).slice(0, 5);
+            });
             if (!vids.length) return ctx.reply('❌ Koi video nahi mili.');
             const lines = vids.map((v, i) => `${i + 1}. *${v.title}*\n   ⏱️ ${v.timestamp} | 👁️ ${v.views}\n   🔗 ${v.url}`);
             await ctx.reply(`🔎 *YOUTUBE SEARCH (${ctx.fullArgs}):*\n\n${lines.join('\n\n')}`);
@@ -301,21 +315,20 @@ const commands = [
                 `https://api.ryzendesu.vip/api/downloader/capcut?url=${encodeURIComponent(url)}`,
                 `https://backend1.tioo.eu.org/capcut?url=${encodeURIComponent(url)}`
             ];
-            for (const api of apis) {
-                try {
-                    const res = await axios.get(api, { timeout: 12000, headers: { 'User-Agent': UA } });
+            try {
+                const winner = await Promise.any(apis.map(async (api) => {
+                    const res = await httpClient.get(api, { timeout: 9000, headers: { 'User-Agent': UA } });
                     const d = res.data || {};
                     const cand = d.videoUrl || d.originalVideoUrl || d.video_url || d.result?.video || d.data?.url;
-                    if (cand) {
-                        vid = cand;
-                        title = d.title || d.result?.title || title;
-                        break;
-                    }
-                } catch (_) {}
-            }
+                    if (!cand) throw new Error('no video');
+                    return { vid: cand, title: d.title || d.result?.title || title };
+                }));
+                vid = winner.vid;
+                title = winner.title;
+            } catch (_) {}
             if (!vid) throw new Error('CapCut video nahi mili.');
             await ctx.sock.sendMessage(ctx.from, { video: { url: vid }, caption: `🎬 *CapCut:* ${title}` }, ctx.quoteOpt);
-            await ctx.react('✅');
+            ctx.react('✅');
         }
     },
     {
@@ -325,39 +338,37 @@ const commands = [
         desc: 'Android APK search karke direct bhejein',
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}apk WhatsApp*`);
-            await ctx.react('⏳');
-            let apkData = null;
+            ctx.react('⏳');
+            const apkData = await withTtlCache(`apk:${ctx.fullArgs.toLowerCase()}`, 600000, async () => {
+                // Tier 1: Aptoide official search JSON API (fast & reliable)
+                try {
+                    const r = await httpClient.get(`https://ws75.aptoide.com/api/7/apps/search?query=${encodeURIComponent(ctx.fullArgs)}&limit=1`, { timeout: 9000, headers: { 'User-Agent': UA } });
+                    const app = r.data?.datalist?.list?.[0];
+                    if (app?.file?.path) {
+                        return {
+                            name: app.name || ctx.fullArgs,
+                            package: app.package || 'android',
+                            size: formatBytes(app.file.filesize || 0),
+                            dllink: app.file.path
+                        };
+                    }
+                } catch (_) {}
 
-            // Tier 1: Aptoide official search JSON API (fast & reliable)
-            try {
-                const r = await axios.get(`https://ws75.aptoide.com/api/7/apps/search?query=${encodeURIComponent(ctx.fullArgs)}&limit=1`, { timeout: 12000, headers: { 'User-Agent': UA } });
-                const app = r.data?.datalist?.list?.[0];
-                if (app?.file?.path) {
-                    apkData = {
-                        name: app.name || ctx.fullArgs,
-                        package: app.package || 'android',
-                        size: formatBytes(app.file.filesize || 0),
-                        dllink: app.file.path
-                    };
-                }
-            } catch (_) {}
-
-            // Tier 2: Fallback APK APIs
-            if (!apkData) {
-                for (const ep of [
-                    `https://api.princetechn.com/api/download/apkdl?apikey=prince&appName=${encodeURIComponent(ctx.fullArgs)}`,
-                    `https://bk9.fun/download/apk?q=${encodeURIComponent(ctx.fullArgs)}`
-                ]) {
-                    try {
-                        const r = await axios.get(ep, { timeout: 10000 });
+                // Tier 2: Race fallback APK APIs
+                try {
+                    return await Promise.any([
+                        `https://api.princetechn.com/api/download/apkdl?apikey=prince&appName=${encodeURIComponent(ctx.fullArgs)}`,
+                        `https://bk9.fun/download/apk?q=${encodeURIComponent(ctx.fullArgs)}`
+                    ].map(async (ep) => {
+                        const r = await httpClient.get(ep, { timeout: 8000 });
                         const d = r.data?.result || r.data?.BK9;
-                        if (d?.dllink) {
-                            apkData = d;
-                            break;
-                        }
-                    } catch (_) {}
+                        if (!d?.dllink) throw new Error('no apk');
+                        return d;
+                    }));
+                } catch (_) {
+                    return null;
                 }
-            }
+            });
 
             if (!apkData?.dllink) return ctx.reply(`❌ APK nahi mili: *${ctx.fullArgs}*`);
             await ctx.sock.sendMessage(ctx.from, {
@@ -366,7 +377,7 @@ const commands = [
                 fileName: `${String(apkData.name || ctx.fullArgs).replace(/[^a-zA-Z0-9_-]/g, '_')}.apk`,
                 caption: `📱 *App:* ${apkData.name}\n📦 *Pkg:* ${apkData.package || 'android'}\n📏 *Size:* ${apkData.size || 'Unknown'}`
             }, ctx.quoteOpt);
-            await ctx.react('✅');
+            ctx.react('✅');
         }
     },
     {
@@ -377,15 +388,15 @@ const commands = [
         handler: async (ctx) => {
             const url = ctx.args[0];
             if (!url || !isSafePublicHttpUrl(url) || !url.includes('mediafire.com')) return ctx.reply(`Usage: *${ctx.prefix}mf <mediafire link>*`);
-            await ctx.react('⏳');
-            const res = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': UA } });
-            const $ = cheerio.load(res.data);
+            ctx.react('⏳');
+            const res = await httpClient.get(url, { timeout: 10000, headers: { 'User-Agent': UA } });
+            const $ = getCheerio().load(res.data);
             const dl = $('#downloadButton').attr('href');
             const name = $('.dl-info .promo_ss_file_name').text().trim() || 'mediafire_file';
             const size = $('.dl-info .promo_ss_file_size').text().trim() || 'Unknown';
             if (!dl) throw new Error('Direct download link nahi mila.');
             await ctx.sock.sendMessage(ctx.from, { document: { url: dl }, mimetype: 'application/octet-stream', fileName: name, caption: `📁 *MediaFire:* ${name} (${size})` }, ctx.quoteOpt);
-            await ctx.react('✅');
+            ctx.react('✅');
         }
     },
     {
@@ -398,19 +409,19 @@ const commands = [
             const m = url.match(/\/file\/d\/([a-zA-Z0-9_-]{20,})|id=([a-zA-Z0-9_-]{20,})/);
             const fileId = m?.[1] || m?.[2];
             if (!fileId) return ctx.reply(`Usage: *${ctx.prefix}gdrive <google drive file link>*`);
-            await ctx.react('⏳');
+            ctx.react('⏳');
             const dl = `https://docs.google.com/uc?export=download&id=${fileId}`;
             let fileName = `gdrive_${fileId}`;
             let size = 'Unknown';
             try {
-                const head = await axios.head(dl, { timeout: 8000, maxRedirects: 5, headers: { 'User-Agent': UA } });
+                const head = await httpClient.head(dl, { timeout: 6000, maxRedirects: 5, headers: { 'User-Agent': UA } });
                 const disp = head.headers['content-disposition'] || '';
                 const fm = disp.match(/filename="?([^"]+)"?/i);
                 if (fm) fileName = fm[1];
                 if (head.headers['content-length']) size = formatBytes(head.headers['content-length']);
             } catch (_) {}
             await ctx.sock.sendMessage(ctx.from, { document: { url: dl }, mimetype: 'application/octet-stream', fileName, caption: `☁️ *GDrive File:* ${fileName}\n📏 *Size:* ${size}` }, ctx.quoteOpt);
-            await ctx.react('✅');
+            ctx.react('✅');
         }
     },
     {
@@ -422,12 +433,14 @@ const commands = [
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}pin cute cat | 2*`);
             const [q, cnt] = ctx.fullArgs.split('|').map((s) => s.trim());
             const amount = Math.min(5, Math.max(1, parseInt(cnt, 10) || 1));
-            const res = await axios.get(`https://apis.davidcyril.name.ng/search/pinterest?text=${encodeURIComponent(q)}&apikey=`, { timeout: 15000 });
-            const items = res.data?.result || [];
+            const items = await withTtlCache(`pin:${q.toLowerCase()}`, 300000, async () => {
+                const res = await httpClient.get(`https://apis.davidcyril.name.ng/search/pinterest?text=${encodeURIComponent(q)}&apikey=`, { timeout: 10000 });
+                return res.data?.result || [];
+            });
             if (!items.length) return ctx.reply('❌ Pinterest par koi image nahi mili.');
             for (const item of items.slice(0, amount)) {
                 await ctx.sock.sendMessage(ctx.from, { image: { url: item.image }, caption: `📌 *${q}*` }, ctx.quoteOpt);
-                await sleep(700);
+                if (amount > 1) await sleep(350);
             }
         }
     },
@@ -463,7 +476,10 @@ const commands = [
         handler: async (ctx) => {
             const pkg = ctx.args[0];
             if (!pkg) return ctx.reply(`Usage: *${ctx.prefix}npm axios*`);
-            const { data } = await axios.get(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, { timeout: 10000 });
+            const data = await withTtlCache(`npm:${pkg.toLowerCase()}`, 300000, async () => {
+                const res = await httpClient.get(`https://registry.npmjs.org/${encodeURIComponent(pkg)}`, { timeout: 8000 });
+                return res.data;
+            });
             const latest = data['dist-tags']?.latest;
             const info = data.versions?.[latest] || {};
             await ctx.reply(
@@ -536,7 +552,7 @@ const commands = [
         handler: async (ctx) => {
             const safeUrl = isSafePublicHttpUrl(ctx.args[0]);
             if (!safeUrl) return ctx.reply(`Usage: *${ctx.prefix}getfile https://example.com/file.pdf*`);
-            const head = await axios.head(safeUrl, { timeout: 8000, maxRedirects: 5 }).catch(() => null);
+            const head = await httpClient.head(safeUrl, { timeout: 7000, maxRedirects: 5 }).catch(() => null);
             const len = Number(head?.headers?.['content-length'] || 0);
             if (len > 45 * 1024 * 1024) return ctx.reply('❌ File 45 MB se bari hai (WhatsApp/RAM limit).');
             const ct = String(head?.headers?.['content-type'] || 'application/octet-stream').split(';')[0];

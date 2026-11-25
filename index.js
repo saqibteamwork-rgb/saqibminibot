@@ -16,11 +16,11 @@ const path = require('path');
 const fs = require('fs-extra');
 const zlib = require('zlib');
 const express = require('express');
-const axios = require('axios');
 const pino = require('pino');
 const { MongoClient } = require('mongodb');
 const {
     default: makeWASocket,
+    DEFAULT_CONNECTION_CONFIG,
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
@@ -33,6 +33,8 @@ const {
 const configStore = require('./src/configStore');
 const registry = require('./src/commands');
 const {
+    httpClient,
+    clearTtlCache,
     escapeHtml,
     unwrapMessage,
     getContextInfo,
@@ -66,7 +68,14 @@ let connectStartedAt = 0;
 let reconnectTimer = null;
 let consecutive401Count = 0;
 let currentPairingCode = null;
-let cachedBaileysVersion = null;
+let cachedBaileysVersion = Array.isArray(DEFAULT_CONNECTION_CONFIG?.version) ? DEFAULT_CONNECTION_CONFIG.version : [2, 3000, 1043857760];
+let versionRefreshStarted = false;
+
+let cachedBotPn = null;
+let cachedBotLid = null;
+let cachedBotDigits = '';
+let cachedPrefixKey = '';
+let cachedPrefixRegex = null;
 
 let mongoClient = null;
 let mongoDb = null;
@@ -137,6 +146,7 @@ function trimCaches() {
     if (antideleteCache.size > 150) antideleteCache.clear();
     if (groupMetaCache.size > 50) groupMetaCache.clear();
     if (processedMsgIds.size > 1000) processedMsgIds.clear();
+    clearTtlCache();
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -257,13 +267,13 @@ async function executeCloudBackupNow() {
         const allFiles = await fs.readdir(SESSION_DIR);
         const leanSet = filterLeanSessionFiles(allFiles);
         const filesMap = {};
-        for (const f of leanSet) {
+        await Promise.all(Array.from(leanSet).map(async (f) => {
             const fp = path.join(SESSION_DIR, f);
             const stat = await fs.stat(fp).catch(() => null);
             if (stat?.isFile()) {
                 filesMap[f] = await fs.readFile(fp, 'utf8');
             }
-        }
+        }));
         if (!filesMap['creds.json']) return false;
 
         const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'));
@@ -295,7 +305,7 @@ function backupSessionToCloud() {
     if (backupDebounceTimer) clearTimeout(backupDebounceTimer);
     backupDebounceTimer = setTimeout(() => {
         executeCloudBackupNow().catch(() => {});
-    }, 3000);
+    }, 12000);
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -343,13 +353,13 @@ async function initWhatsApp(pairingNumber = null) {
             backupSessionToCloud();
         };
 
-        if (!cachedBaileysVersion) {
-            try {
-                const fetched = await fetchLatestBaileysVersion();
-                cachedBaileysVersion = fetched?.version;
-            } catch (_) {
-                cachedBaileysVersion = [2, 3000, 1025190524];
-            }
+        if (!versionRefreshStarted) {
+            versionRefreshStarted = true;
+            fetchLatestBaileysVersion()
+                .then((fetched) => {
+                    if (Array.isArray(fetched?.version)) cachedBaileysVersion = fetched.version;
+                })
+                .catch(() => {});
         }
 
         console.log(`🚀 [Baileys] Booting WASocket (WA v${cachedBaileysVersion.join('.')})...`);
@@ -365,12 +375,13 @@ async function initWhatsApp(pairingNumber = null) {
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
             markOnlineOnConnect: true,
-            keepAliveIntervalMs: 15000,
-            connectTimeoutMs: 25000,
-            defaultQueryTimeoutMs: 25000,
+            keepAliveIntervalMs: 10000,
+            connectTimeoutMs: 15000,
+            defaultQueryTimeoutMs: 15000,
             emitOwnEvents: true,
-            retryRequestDelayMs: 2000,
+            retryRequestDelayMs: 1000,
             maxMsgRetryCount: 5,
+            generateHighQualityLinkPreview: false,
             cachedGroupMetadata: async (jid) => getCachedGroupMeta(jid),
             getMessage: async (key) => {
                 if (!key || key.remoteJid?.endsWith('@newsletter')) return undefined;
@@ -385,8 +396,8 @@ async function initWhatsApp(pairingNumber = null) {
         // Safe-Send wrapper: routes self-chat cleanly to phone JID & strips self-quotes to prevent E2EE stalls
         const rawSendMessage = sock.sendMessage.bind(sock);
         sock.sendMessage = async (jid, content, options = {}) => {
-            const botPn = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
-            const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+            const botPn = cachedBotPn || (sock?.user?.id ? jidNormalizedUser(sock.user.id) : null);
+            const botLid = cachedBotLid || (sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null);
             let targetJid = jid ? jidNormalizedUser(jid) : null;
 
             if (targetJid && !targetJid.endsWith('@g.us') && !targetJid.endsWith('@newsletter')) {
@@ -455,6 +466,9 @@ async function initWhatsApp(pairingNumber = null) {
                 const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
                 isConnected = false;
                 isConnecting = false;
+                cachedBotPn = null;
+                cachedBotLid = null;
+                cachedBotDigits = '';
 
                 console.log(`⚠️ [Connection Closed] Status: ${statusCode || 'unknown'}`);
 
@@ -480,7 +494,10 @@ async function initWhatsApp(pairingNumber = null) {
                 currentPairingCode = null;
 
                 const cfg = configStore.getConfig();
-                const botJid = jidNormalizedUser(sock.user.id);
+                cachedBotPn = jidNormalizedUser(sock.user.id);
+                cachedBotLid = sock.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+                cachedBotDigits = configStore.normalizeDigits(cachedBotPn);
+                const botJid = cachedBotPn;
                 const totalCmds = registry.getAllCommands().length;
 
                 console.log(`🟢 [CONNECTED] ${cfg.botName} ONLINE as ${botJid} (${totalCmds} commands | RAM ${getMemoryUsageMb()}MB)`);
@@ -537,201 +554,204 @@ async function initWhatsApp(pairingNumber = null) {
             } catch (_) {}
         });
 
-        sock.ev.on('messages.upsert', async ({ messages, type }) => {
-            if (type !== 'notify' || !Array.isArray(messages)) return;
+        function getPrefixRegex(activePrefix) {
+            if (cachedPrefixRegex && cachedPrefixKey === activePrefix) return cachedPrefixRegex;
+            cachedPrefixKey = activePrefix;
+            cachedPrefixRegex = new RegExp(`^(${escapeRegExp(activePrefix)})\\s*([a-zA-Z0-9_-]+)([\\s\\S]*)$`);
+            return cachedPrefixRegex;
+        }
 
-            for (const msg of messages) {
-                try {
-                    if (!msg?.message || !msg.key) continue;
-                    const msgId = msg.key.id;
-                    if (msgId && processedMsgIds.has(msgId)) continue;
-                    if (msgId) capSet(processedMsgIds, msgId, 1500);
+        async function handleSingleIncomingMessage(msg) {
+            try {
+                if (!msg?.message || !msg.key) return;
+                const msgId = msg.key.id;
+                if (msgId && processedMsgIds.has(msgId)) return;
+                if (msgId) capSet(processedMsgIds, msgId, 1500);
 
-                    cacheMessage(msg);
-                    const cfg = configStore.getConfig();
+                cacheMessage(msg);
+                const cfg = configStore.getConfig();
 
-                    // Auto-view WhatsApp statuses if enabled
-                    if (msg.key.remoteJid === 'status@broadcast') {
-                        if (cfg.autoviewStatus && !msg.key.fromMe) {
-                            await sock.readMessages([msg.key]).catch(() => {});
-                        }
-                        if (!msg.message?.deviceSentMessage?.destinationJid) continue;
-                    }
-
-                    if (msg.key.remoteJid?.endsWith('@newsletter')) continue;
-
-                    // Handle Anti-Delete revoke notifications
-                    const protoMsg = msg.message?.protocolMessage;
-                    if (protoMsg?.type === 0 && cfg.antidelete) {
-                        const revokedId = protoMsg.key?.id;
-                        const cached = revokedId ? antideleteCache.get(revokedId) : null;
-                        if (cached && sock?.user?.id) {
-                            const botPn = jidNormalizedUser(sock.user.id);
-                            await sock.sendMessage(botPn, {
-                                text: `🛡️ *ANTI-DELETE RECOVERED*\n👤 *From:* ${cached.chat}\n📱 *Sender:* +${cached.sender}\n\n📝 *Message:*\n${cached.text || '[Media / Non-Text]'}`
-                            }).catch(() => {});
-                        }
-                        continue;
-                    }
-
-                    const botPn = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
-                    const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
-                    const botDigits = configStore.normalizeDigits(botPn);
-
-                    let rawFrom = msg.key.remoteJid;
-                    if ((!rawFrom || rawFrom === 'status@broadcast') && msg.message?.deviceSentMessage?.destinationJid) {
-                        rawFrom = msg.message.deviceSentMessage.destinationJid;
-                    }
-                    if (!rawFrom || rawFrom === 'status@broadcast') rawFrom = botPn;
-                    if (!rawFrom) continue;
-
-                    let from = jidNormalizedUser(rawFrom);
-                    const isFromMe = Boolean(msg.key.fromMe);
-                    const isGroup = from.endsWith('@g.us');
-
-                    const isSelfChat = isFromMe && (
-                        from === botPn ||
-                        from === botLid ||
-                        areJidsSameUser(from, botPn) ||
-                        (botLid && areJidsSameUser(from, botLid))
-                    );
-
-                    if (isSelfChat && botPn) {
-                        from = botPn;
-                    } else if (from.endsWith('@lid')) {
-                        const alt = msg.key.remoteJidAlt || msg.key.participantAlt;
-                        if (alt && alt.endsWith('@s.whatsapp.net')) from = jidNormalizedUser(alt);
-                    }
-
-                    const groupMeta = isGroup ? await getCachedGroupMeta(from) : null;
-                    const senderRawJid = isGroup ? (msg.key.participant || from) : from;
-                    const senderDigits = await resolveSenderDigits(sock, msg, groupMeta);
-                    const isOwner = isFromMe || configStore.isOwnerDigits(senderDigits) || (botDigits && senderDigits === botDigits);
-
-                    // Auto-ViewOnce recovery if enabled
-                    const rawRoot = msg.message;
-                    const isViewOnceMsg = Boolean(
-                        rawRoot.viewOnceMessage || rawRoot.viewOnceMessageV2 || rawRoot.viewOnceMessageV2Extension
-                    );
-                    if (cfg.autovv && isViewOnceMsg && !isFromMe && botPn) {
-                        extractMedia(rawRoot).then(async (voMedia) => {
-                            if (!voMedia) return;
-                            const voCap = `🔓 *AUTO VIEW-ONCE*\n👤 *From:* +${senderDigits || 'Unknown'}`;
-                            if (voMedia.mediaType === 'image') await sock.sendMessage(botPn, { image: voMedia.buffer, caption: voCap });
-                            else if (voMedia.mediaType === 'video') await sock.sendMessage(botPn, { video: voMedia.buffer, caption: voCap });
-                            else if (voMedia.mediaType === 'audio') await sock.sendMessage(botPn, { audio: voMedia.buffer, mimetype: voMedia.mimetype || 'audio/mp4', ptt: voMedia.ptt });
-                        }).catch(() => {});
-                    }
-
-                    const content = unwrapMessage(rawRoot);
-                    if (!content) continue;
-
-                    const mCtx = getContextInfo(content);
-                    const quotedMsg = mCtx?.quotedMessage || null;
-                    const rawText = getTextFromContent(content);
-
-                    if (cfg.antidelete && msgId && rawText && !isFromMe) {
-                        capMap(antideleteCache, msgId, { chat: groupMeta?.subject || from, sender: senderDigits, text: rawText }, 500);
-                    }
-
-                    // Group Anti-Link enforcement
-                    if (isGroup && rawText && !isOwner && !isFromMe) {
-                        const gs = configStore.getGroupSettings(from);
-                        if (gs.antilink && /(https?:\/\/)?(chat\.whatsapp\.com|whatsapp\.com\/channel)\/\S+/i.test(rawText)) {
-                            const adminState = getGroupAdminState(sock, groupMeta, senderRawJid, senderDigits);
-                            if (!adminState.isSenderAdmin && adminState.isBotAdmin) {
-                                await sock.sendMessage(from, { delete: msg.key }).catch(() => {});
-                                const warns = configStore.addWarning(from, senderDigits);
-                                if (warns >= 3) {
-                                    configStore.resetWarnings(from, senderDigits);
-                                    await sock.groupParticipantsUpdate(from, [senderRawJid], 'remove').catch(() => {});
-                                    await sock.sendMessage(from, { text: `🚨 *ANTI-LINK:* @${senderRawJid.split('@')[0]} 3/3 warnings par remove ho gaye!`, mentions: [senderRawJid] }).catch(() => {});
-                                } else {
-                                    await sock.sendMessage(from, { text: `🔗 *ANTI-LINK:* @${senderRawJid.split('@')[0]} group mein link allow nahi! (Warning *${warns}/3*)`, mentions: [senderRawJid] }).catch(() => {});
-                                }
-                                continue;
-                            }
-                        }
-                    }
-
-                    if (!rawText) continue;
-
-                    const cleanText = rawText.replace(/[\u200e\u200f\u200b\u200c\u200d\u2060\ufeff]/g, '').trim();
-                    const activePrefix = cfg.prefix || '.';
-                    const prefixRegex = new RegExp(`^(${escapeRegExp(activePrefix)})\\s*([a-zA-Z0-9_-]+)([\\s\\S]*)$`);
-                    const match = cleanText.match(prefixRegex);
-                    if (!match) continue;
-
-                    // Ignore stale queued commands older than 2 minutes on reconnect
-                    const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
-                    if (Date.now() - msgTime > 120000) continue;
-
-                    if (cfg.mode !== 'public' && !isOwner) continue;
-                    if (!isOwner && configStore.isBannedDigits(senderDigits)) continue;
-
-                    const commandName = match[2].toLowerCase();
-                    const fullArgs = (match[3] || '').trim();
-                    const args = fullArgs ? fullArgs.split(/\s+/).filter(Boolean) : [];
-                    const cmd = registry.findCommand(commandName);
-                    if (!cmd) continue;
-
-                    if (cfg.autoread && !isFromMe) {
+                if (msg.key.remoteJid === 'status@broadcast') {
+                    if (cfg.autoviewStatus && !msg.key.fromMe) {
                         sock.readMessages([msg.key]).catch(() => {});
                     }
-                    if (cfg.autotyping) {
-                        sock.sendPresenceUpdate('composing', from).catch(() => {});
-                    } else if (cfg.autorecord) {
-                        sock.sendPresenceUpdate('recording', from).catch(() => {});
-                    }
-
-                    const quoteOpt = isGroup ? { quoted: msg } : {};
-                    const ctx = {
-                        sock,
-                        from,
-                        msg,
-                        content,
-                        quotedMsg,
-                        isGroup,
-                        isSelfChat,
-                        isFromMe,
-                        isOwner,
-                        groupMeta,
-                        senderRawJid,
-                        senderDigits,
-                        prefix: activePrefix,
-                        commandName,
-                        args,
-                        fullArgs,
-                        msgTime,
-                        quoteOpt,
-                        registry,
-                        runtime: {
-                            getMemoryUsageMb,
-                            getUptimeSec,
-                            trimCaches,
-                            forceCloudBackup: executeCloudBackupNow
-                        },
-                        reply: (text) => sock.sendMessage(from, { text }, quoteOpt),
-                        react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {})
-                    };
-
-                    try {
-                        await cmd.handler(ctx);
-                    } catch (execErr) {
-                        console.error(`❌ [CMD ${commandName}]:`, execErr.message);
-                        await ctx.react('❌');
-                        await ctx.reply(`❌ *Error (${commandName}):* ${execErr.message}`).catch(() => {});
-                    }
-                } catch (loopErr) {
-                    console.error('❌ [Message Loop Error]:', loopErr.message);
+                    if (!msg.message?.deviceSentMessage?.destinationJid) return;
                 }
+
+                if (msg.key.remoteJid?.endsWith('@newsletter')) return;
+
+                const protoMsg = msg.message?.protocolMessage;
+                if (protoMsg?.type === 0 && cfg.antidelete) {
+                    const revokedId = protoMsg.key?.id;
+                    const cached = revokedId ? antideleteCache.get(revokedId) : null;
+                    const botPn = cachedBotPn || (sock?.user?.id ? jidNormalizedUser(sock.user.id) : null);
+                    if (cached && botPn) {
+                        await sock.sendMessage(botPn, {
+                            text: `🛡️ *ANTI-DELETE RECOVERED*\n👤 *From:* ${cached.chat}\n📱 *Sender:* +${cached.sender}\n\n📝 *Message:*\n${cached.text || '[Media / Non-Text]'}`
+                        }).catch(() => {});
+                    }
+                    return;
+                }
+
+                const botPn = cachedBotPn || (sock?.user?.id ? jidNormalizedUser(sock.user.id) : null);
+                const botLid = cachedBotLid || (sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null);
+                const botDigits = cachedBotDigits || configStore.normalizeDigits(botPn);
+
+                let rawFrom = msg.key.remoteJid;
+                if ((!rawFrom || rawFrom === 'status@broadcast') && msg.message?.deviceSentMessage?.destinationJid) {
+                    rawFrom = msg.message.deviceSentMessage.destinationJid;
+                }
+                if (!rawFrom || rawFrom === 'status@broadcast') rawFrom = botPn;
+                if (!rawFrom) return;
+
+                let from = jidNormalizedUser(rawFrom);
+                const isFromMe = Boolean(msg.key.fromMe);
+                const isGroup = from.endsWith('@g.us');
+
+                const isSelfChat = isFromMe && (
+                    from === botPn ||
+                    from === botLid ||
+                    areJidsSameUser(from, botPn) ||
+                    (botLid && areJidsSameUser(from, botLid))
+                );
+
+                if (isSelfChat && botPn) {
+                    from = botPn;
+                } else if (from.endsWith('@lid')) {
+                    const alt = msg.key.remoteJidAlt || msg.key.participantAlt;
+                    if (alt && alt.endsWith('@s.whatsapp.net')) from = jidNormalizedUser(alt);
+                }
+
+                const rawRoot = msg.message;
+                const isViewOnceMsg = Boolean(
+                    rawRoot.viewOnceMessage || rawRoot.viewOnceMessageV2 || rawRoot.viewOnceMessageV2Extension
+                );
+                if (cfg.autovv && isViewOnceMsg && !isFromMe && botPn) {
+                    extractMedia(rawRoot).then(async (voMedia) => {
+                        if (!voMedia) return;
+                        const voCap = `🔓 *AUTO VIEW-ONCE*\n👤 *From:* +${msg.key.participant?.split('@')[0] || from.split('@')[0] || 'Unknown'}`;
+                        if (voMedia.mediaType === 'image') await sock.sendMessage(botPn, { image: voMedia.buffer, caption: voCap });
+                        else if (voMedia.mediaType === 'video') await sock.sendMessage(botPn, { video: voMedia.buffer, caption: voCap });
+                        else if (voMedia.mediaType === 'audio') await sock.sendMessage(botPn, { audio: voMedia.buffer, mimetype: voMedia.mimetype || 'audio/mp4', ptt: voMedia.ptt });
+                    }).catch(() => {});
+                }
+
+                const content = unwrapMessage(rawRoot);
+                if (!content) return;
+                const rawText = getTextFromContent(content);
+                if (!rawText) return;
+
+                // Ultra-fast synchronous gate BEFORE fetching groupMetadata or resolving LIDs
+                const cleanText = rawText.replace(/[\u200e\u200f\u200b\u200c\u200d\u2060\ufeff]/g, '').trim();
+                const activePrefix = cfg.prefix || '.';
+                const match = cleanText.match(getPrefixRegex(activePrefix));
+                const gs = isGroup ? configStore.getGroupSettings(from) : null;
+                const hasLinkViolation = Boolean(
+                    isGroup && gs?.antilink && !isFromMe && /(https?:\/\/)?(chat\.whatsapp\.com|whatsapp\.com\/channel)\/\S+/i.test(rawText)
+                );
+
+                if (cfg.antidelete && msgId && !isFromMe) {
+                    capMap(antideleteCache, msgId, { chat: from, sender: msg.key.participant?.split('@')[0] || from.split('@')[0], text: rawText }, 500);
+                }
+
+                if (!match && !hasLinkViolation) return;
+
+                const cmd = match ? registry.findCommand(match[2].toLowerCase()) : null;
+                if (!cmd && !hasLinkViolation) return;
+
+                // Resolve groupMetadata & sender identities ONLY for actual commands or antilink triggers
+                const groupMeta = isGroup ? await getCachedGroupMeta(from) : null;
+                const senderRawJid = isGroup ? (msg.key.participant || from) : from;
+                const senderDigits = await resolveSenderDigits(sock, msg, groupMeta);
+                const isOwner = isFromMe || configStore.isOwnerDigits(senderDigits) || (botDigits && senderDigits === botDigits);
+
+                if (hasLinkViolation && !isOwner) {
+                    const adminState = getGroupAdminState(sock, groupMeta, senderRawJid, senderDigits);
+                    if (!adminState.isSenderAdmin && adminState.isBotAdmin) {
+                        sock.sendMessage(from, { delete: msg.key }).catch(() => {});
+                        const warns = configStore.addWarning(from, senderDigits);
+                        if (warns >= 3) {
+                            configStore.resetWarnings(from, senderDigits);
+                            sock.groupParticipantsUpdate(from, [senderRawJid], 'remove').catch(() => {});
+                            sock.sendMessage(from, { text: `🚨 *ANTI-LINK:* @${senderRawJid.split('@')[0]} 3/3 warnings par remove ho gaye!`, mentions: [senderRawJid] }).catch(() => {});
+                        } else {
+                            sock.sendMessage(from, { text: `🔗 *ANTI-LINK:* @${senderRawJid.split('@')[0]} group mein link allow nahi! (Warning *${warns}/3*)`, mentions: [senderRawJid] }).catch(() => {});
+                        }
+                        return;
+                    }
+                }
+
+                if (!cmd) return;
+
+                const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
+                if (Date.now() - msgTime > 120000) return;
+                if (cfg.mode !== 'public' && !isOwner) return;
+                if (!isOwner && configStore.isBannedDigits(senderDigits)) return;
+
+                if (cfg.autoread && !isFromMe) sock.readMessages([msg.key]).catch(() => {});
+                if (cfg.autotyping) sock.sendPresenceUpdate('composing', from).catch(() => {});
+                else if (cfg.autorecord) sock.sendPresenceUpdate('recording', from).catch(() => {});
+
+                const mCtx = getContextInfo(content);
+                const quotedMsg = mCtx?.quotedMessage || null;
+                const commandName = match[2].toLowerCase();
+                const fullArgs = (match[3] || '').trim();
+                const args = fullArgs ? fullArgs.split(/\s+/).filter(Boolean) : [];
+                const quoteOpt = isGroup ? { quoted: msg } : {};
+
+                const ctx = {
+                    sock,
+                    from,
+                    msg,
+                    content,
+                    quotedMsg,
+                    isGroup,
+                    isSelfChat,
+                    isFromMe,
+                    isOwner,
+                    groupMeta,
+                    senderRawJid,
+                    senderDigits,
+                    prefix: activePrefix,
+                    commandName,
+                    args,
+                    fullArgs,
+                    msgTime,
+                    quoteOpt,
+                    registry,
+                    runtime: {
+                        getMemoryUsageMb,
+                        getUptimeSec,
+                        trimCaches,
+                        forceCloudBackup: executeCloudBackupNow
+                    },
+                    reply: (text) => sock.sendMessage(from, { text }, quoteOpt),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } }).catch(() => {})
+                };
+
+                try {
+                    await cmd.handler(ctx);
+                } catch (execErr) {
+                    console.error(`❌ [CMD ${commandName}]:`, execErr.message);
+                    ctx.react('❌');
+                    await ctx.reply(`❌ *Error (${commandName}):* ${execErr.message}`).catch(() => {});
+                }
+            } catch (loopErr) {
+                console.error('❌ [Message Handler Error]:', loopErr.message);
+            }
+        }
+
+        sock.ev.on('messages.upsert', ({ messages, type }) => {
+            if (type !== 'notify' || !Array.isArray(messages) || messages.length === 0) return;
+            for (const msg of messages) {
+                void handleSingleIncomingMessage(msg);
             }
         });
 
         // Pairing Code generation (safe because all listeners are ALREADY attached above!)
         if (pairingNumber && !sock.authState.creds.registered) {
             const clean = pairingNumber.replace(/[^0-9]/g, '');
-            await delayOrSleep(1500);
+            await delayOrSleep(500);
             const code = await sock.requestPairingCode(clean);
             currentPairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
             console.log(`🔑 [Pairing Code] +${clean} => ${currentPairingCode}`);
@@ -761,7 +781,7 @@ async function pingPublicKeepAlive() {
         const myUrl = process.env.APP_URL || (process.env.HEROKU_APP_NAME ? `https://${process.env.HEROKU_APP_NAME}.herokuapp.com` : null);
         if (myUrl && !myUrl.includes('localhost') && !myUrl.includes('127.0.0.1')) {
             const cleanUrl = myUrl.replace(/\/+$/, '');
-            await axios.get(`${cleanUrl}/health`, {
+            await httpClient.get(`${cleanUrl}/health`, {
                 timeout: 5000,
                 headers: { 'User-Agent': 'MiniBot-ZeroSleep/2.0' }
             }).catch(() => null);
@@ -963,9 +983,7 @@ app.get('/', (req, res) => {
 // ═════════════════════════════════════════════════════════════
 
 app.listen(PORT, async () => {
-    await initMongo().catch(() => {});
     await configStore.loadConfig().catch(() => {});
-
     const cfg = configStore.getConfig();
     console.log(`\n======================================================`);
     console.log(`⚡ ${cfg.botName} v2.0 RUNNING ON PORT ${PORT}`);
@@ -973,11 +991,22 @@ app.listen(PORT, async () => {
     console.log(`💾 Initial RAM: ${getMemoryUsageMb()} MB / 512 MB`);
     console.log(`======================================================\n`);
 
-    await restoreSessionFromCloud();
     const credsFile = path.join(SESSION_DIR, 'creds.json');
     const localCredsRaw = fs.existsSync(credsFile) ? await fs.readFile(credsFile, 'utf8').catch(() => '') : '';
+
     if (isRegisteredCredsJson(localCredsRaw)) {
-        console.log('🔑 [Auth] Valid registered credentials detected. Connecting to WhatsApp...');
+        // Zero-wait boot: connect WhatsApp immediately while syncing MongoDB in background!
+        console.log('🔑 [Auth] Local registered credentials detected. Connecting immediately...');
+        initWhatsApp().catch((err) => console.error('❌ [Auto-Connect Error]:', err.message));
+        initMongo().then((db) => db && configStore.loadConfig(db)).catch(() => {});
+        return;
+    }
+
+    await initMongo().then((db) => db && configStore.loadConfig(db)).catch(() => {});
+    await restoreSessionFromCloud();
+    const restoredRaw = fs.existsSync(credsFile) ? await fs.readFile(credsFile, 'utf8').catch(() => '') : '';
+    if (isRegisteredCredsJson(restoredRaw)) {
+        console.log('🔑 [Auth] Restored registered credentials. Connecting to WhatsApp...');
         initWhatsApp().catch((err) => console.error('❌ [Auto-Connect Error]:', err.message));
     } else {
         console.log('ℹ️ [Auth] No registered session yet. Open Web Dashboard to pair.');

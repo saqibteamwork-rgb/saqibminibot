@@ -4,12 +4,15 @@
  * MINI BOT MD :: Useful Search, Converter, Islamic & Utility Tools (25 commands)
  */
 
-const axios = require('axios');
 const crypto = require('crypto');
-const QRCode = require('qrcode');
-const googleTTS = require('google-tts-api');
-const moment = require('moment-timezone');
-const { isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid } = require('../mediaHelper');
+const { httpClient, withTtlCache, isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid } = require('../mediaHelper');
+
+let _QRCode = null;
+let _googleTTS = null;
+let _moment = null;
+const getQR = () => (_QRCode || (_QRCode = require('qrcode')));
+const getTTS = () => (_googleTTS || (_googleTTS = require('google-tts-api')));
+const getMoment = () => (_moment || (_moment = require('moment-timezone')));
 
 // Safe pure arithmetic expression evaluator (ZERO eval / new Function!)
 function safeMathEval(expr) {
@@ -112,21 +115,27 @@ const commands = [
             } else {
                 return ctx.reply(`Usage: *${ctx.prefix}tr ur Hello friend!* ya kisi message par reply karke *${ctx.prefix}tr ur* likhein.`);
             }
-            let out = '';
-            // Tier 1: Google Translate
-            try {
-                const { data } = await axios.get(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(lang)}&dt=t&q=${encodeURIComponent(text)}`, { timeout: 9000 });
-                out = (data?.[0] || []).map((chunk) => chunk?.[0] || '').join('').trim();
-            } catch (_) {}
-
-            // Tier 2: MyMemory fallback
-            if (!out) {
+            const out = await withTtlCache(`tr:${lang}:${text.slice(0, 120)}`, 600000, async () => {
                 try {
-                    const pair = lang === 'en' ? 'ur|en' : `en|${lang}`;
-                    const { data } = await axios.get(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(pair)}`, { timeout: 9000 });
-                    out = data?.responseData?.translatedText || '';
-                } catch (_) {}
-            }
+                    return await Promise.any([
+                        (async () => {
+                            const { data } = await httpClient.get(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(lang)}&dt=t&q=${encodeURIComponent(text)}`, { timeout: 6000 });
+                            const joined = (data?.[0] || []).map((chunk) => chunk?.[0] || '').join('').trim();
+                            if (!joined) throw new Error('empty');
+                            return joined;
+                        })(),
+                        (async () => {
+                            const pair = lang === 'en' ? 'ur|en' : `en|${lang}`;
+                            const { data } = await httpClient.get(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(pair)}`, { timeout: 6000 });
+                            const res = data?.responseData?.translatedText || '';
+                            if (!res) throw new Error('empty');
+                            return res;
+                        })()
+                    ]);
+                } catch (_) {
+                    return '';
+                }
+            });
 
             if (!out) throw new Error('Translation service abhi busy hai.');
             await ctx.reply(`🌐 *TRANSLATION (${lang.toUpperCase()}):*\n\n${out}`);
@@ -145,7 +154,7 @@ const commands = [
                 lang = ctx.args[0].toLowerCase();
                 text = ctx.args.slice(1).join(' ');
             }
-            const url = googleTTS.getAudioUrl(text.slice(0, 200), { lang, slow: false, host: 'https://translate.google.com' });
+            const url = getTTS().getAudioUrl(text.slice(0, 200), { lang, slow: false, host: 'https://translate.google.com' });
             await ctx.sock.sendMessage(ctx.from, { audio: { url }, mimetype: 'audio/mp4', ptt: true }, ctx.quoteOpt);
         }
     },
@@ -156,9 +165,12 @@ const commands = [
         desc: 'Kisi bhi shehar ka live weather report dekhein',
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}weather Lahore*`);
-            const { data } = await axios.get(`https://wttr.in/${encodeURIComponent(ctx.fullArgs)}?format=j1`, {
-                timeout: 12000,
-                headers: { 'User-Agent': 'curl/8.0' }
+            const data = await withTtlCache(`weather:${ctx.fullArgs.toLowerCase()}`, 180000, async () => {
+                const r = await httpClient.get(`https://wttr.in/${encodeURIComponent(ctx.fullArgs)}?format=j1`, {
+                    timeout: 8000,
+                    headers: { 'User-Agent': 'curl/8.0' }
+                });
+                return r.data;
             });
             const cur = data?.current_condition?.[0];
             if (!cur) throw new Error('City weather nahi mila.');
@@ -181,9 +193,12 @@ const commands = [
         desc: 'Wikipedia summary search karein',
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}wiki Pakistan*`);
-            const { data } = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(ctx.fullArgs)}`, {
-                timeout: 10000,
-                headers: { 'User-Agent': 'MiniBot/2.0 (https://github.com/saqibteamwork-rgb/saqibminobot)' }
+            const data = await withTtlCache(`wiki:${ctx.fullArgs.toLowerCase()}`, 600000, async () => {
+                const r = await httpClient.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(ctx.fullArgs)}`, {
+                    timeout: 8000,
+                    headers: { 'User-Agent': 'MiniBot/2.0 (https://github.com/saqibteamwork-rgb/saqibminobot)' }
+                });
+                return r.data;
             });
             if (!data?.extract) return ctx.reply('❌ Wikipedia par article nahi mila.');
             await ctx.reply(`📚 *WIKIPEDIA: ${data.title}*\n\n${data.extract}\n\n🔗 ${data.content_urls?.desktop?.page || ''}`);
@@ -196,7 +211,7 @@ const commands = [
         desc: 'Kisi text ya URL ka QR Code image banayein',
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}qr https://whatsapp.com*`);
-            const png = await QRCode.toBuffer(ctx.fullArgs, { width: 512, margin: 2 });
+            const png = await getQR().toBuffer(ctx.fullArgs, { width: 512, margin: 2 });
             await ctx.sock.sendMessage(ctx.from, { image: png, caption: `📱 *QR Code Generated!*` }, ctx.quoteOpt);
         }
     },
@@ -208,8 +223,11 @@ const commands = [
         handler: async (ctx) => {
             const safeUrl = isSafePublicHttpUrl(ctx.args[0]);
             if (!safeUrl) return ctx.reply(`Usage: *${ctx.prefix}shorturl https://example.com/long-path*`);
-            const { data } = await axios.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(safeUrl)}`, { timeout: 10000 });
-            await ctx.reply(`🔗 *Short URL:* ${String(data).trim()}`);
+            const data = await withTtlCache(`short:${safeUrl}`, 600000, async () => {
+                const r = await httpClient.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(safeUrl)}`, { timeout: 7000 });
+                return String(r.data).trim();
+            });
+            await ctx.reply(`🔗 *Short URL:* ${data}`);
         }
     },
     {
@@ -233,7 +251,10 @@ const commands = [
             const fromC = (ctx.args[1] || 'USD').toUpperCase();
             const toC = (ctx.args[2] || 'PKR').toUpperCase();
             if (!Number.isFinite(amount)) return ctx.reply(`Usage: *${ctx.prefix}currency 100 USD PKR*`);
-            const { data } = await axios.get(`https://open.er-api.com/v6/latest/${encodeURIComponent(fromC)}`, { timeout: 10000 });
+            const data = await withTtlCache(`fx:${fromC}`, 180000, async () => {
+                const r = await httpClient.get(`https://open.er-api.com/v6/latest/${encodeURIComponent(fromC)}`, { timeout: 8000 });
+                return r.data;
+            });
             const rate = data?.rates?.[toC];
             if (!rate) return ctx.reply('❌ Currency code ghalat hai.');
             await ctx.reply(`💱 *${amount} ${fromC} = ${(amount * rate).toFixed(2)} ${toC}*\n📊 Rate: 1 ${fromC} = ${rate} ${toC}`);
@@ -246,6 +267,7 @@ const commands = [
         desc: 'Kisi city ya country timezone ka live waqt dekhein',
         handler: async (ctx) => {
             const q = (ctx.fullArgs || 'Asia/Karachi').trim();
+            const moment = getMoment();
             const matched = moment.tz.names().find((z) => z.toLowerCase().includes(q.toLowerCase())) || 'Asia/Karachi';
             const now = moment().tz(matched);
             await ctx.reply(`🕰️ *WORLD CLOCK*\n📍 *Zone:* ${matched}\n📅 *Date:* ${now.format('dddd, DD MMM YYYY')}\n⏰ *Time:* ${now.format('hh:mm:ss A')}`);
@@ -259,7 +281,10 @@ const commands = [
         handler: async (ctx) => {
             const target = (ctx.args[0] || '').trim();
             if (!target || /^(127\.|10\.|192\.168\.|localhost)/i.test(target)) return ctx.reply(`Usage: *${ctx.prefix}ip 8.8.8.8*`);
-            const { data } = await axios.get(`http://ip-api.com/json/${encodeURIComponent(target)}?fields=status,country,regionName,city,isp,org,query`, { timeout: 10000 });
+            const data = await withTtlCache(`ip:${target.toLowerCase()}`, 600000, async () => {
+                const r = await httpClient.get(`http://ip-api.com/json/${encodeURIComponent(target)}?fields=status,country,regionName,city,isp,org,query`, { timeout: 8000 });
+                return r.data;
+            });
             if (data?.status !== 'success') return ctx.reply('❌ Valid public IP ya domain dein.');
             await ctx.reply(`🌐 *IP INFO: ${data.query}*\n🏳️ *Country:* ${data.country}\n🏙️ *City:* ${data.city}, ${data.regionName}\n📡 *ISP:* ${data.isp}`);
         }
@@ -272,7 +297,10 @@ const commands = [
         handler: async (ctx) => {
             const user = (ctx.args[0] || '').replace(/[^a-zA-Z0-9-]/g, '');
             if (!user) return ctx.reply(`Usage: *${ctx.prefix}github torvalds*`);
-            const { data } = await axios.get(`https://api.github.com/users/${user}`, { timeout: 10000 });
+            const data = await withTtlCache(`gh:${user.toLowerCase()}`, 300000, async () => {
+                const r = await httpClient.get(`https://api.github.com/users/${user}`, { timeout: 8000 });
+                return r.data;
+            });
             await ctx.reply(
                 `🐙 *GITHUB: ${data.login}*\n` +
                 `👤 *Name:* ${data.name || 'N/A'}\n` +
@@ -291,7 +319,10 @@ const commands = [
         handler: async (ctx) => {
             const word = ctx.args[0];
             if (!word) return ctx.reply(`Usage: *${ctx.prefix}define resilient*`);
-            const { data } = await axios.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, { timeout: 10000 });
+            const data = await withTtlCache(`def:${word.toLowerCase()}`, 900000, async () => {
+                const r = await httpClient.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, { timeout: 8000 });
+                return r.data;
+            });
             const entry = data?.[0];
             const meaning = entry?.meanings?.[0];
             const def = meaning?.definitions?.[0];
@@ -370,7 +401,7 @@ const commands = [
         category: 'tools',
         desc: 'Motivational aur inspiring quotes hasil karein',
         handler: async (ctx) => {
-            const { data } = await axios.get('https://dummyjson.com/quotes/random', { timeout: 8000 });
+            const { data } = await httpClient.get('https://dummyjson.com/quotes/random', { timeout: 7000 });
             await ctx.reply(`💬 _"${data.quote}"_\n\n— *${data.author}*`);
         }
     },
@@ -380,7 +411,7 @@ const commands = [
         category: 'tools',
         desc: 'Mazedaar random knowledge fact',
         handler: async (ctx) => {
-            const { data } = await axios.get('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en', { timeout: 8000 });
+            const { data } = await httpClient.get('https://uselessfacts.jsph.pl/api/v2/facts/random?language=en', { timeout: 7000 });
             await ctx.reply(`💡 *DID YOU KNOW?*\n\n${data.text}`);
         }
     },
@@ -390,17 +421,18 @@ const commands = [
         category: 'tools',
         desc: 'Random English clean joke',
         handler: async (ctx) => {
-            try {
-                const { data } = await axios.get('https://v2.jokeapi.dev/joke/Programming,Misc?safe-mode', { timeout: 8000 });
-                if (data?.setup && data?.delivery) {
-                    return await ctx.reply(`😂 *${data.setup}*\n\n👉 _${data.delivery}_`);
-                }
-                if (data?.joke) {
-                    return await ctx.reply(`😂 ${data.joke}`);
-                }
-            } catch (_) {}
-            const { data } = await axios.get('https://official-joke-api.appspot.com/random_joke', { timeout: 8000 });
-            await ctx.reply(`😂 *${data.setup}*\n\n👉 _${data.punchline}_`);
+            const text = await Promise.any([
+                httpClient.get('https://v2.jokeapi.dev/joke/Programming,Misc?safe-mode', { timeout: 6000 }).then(({ data }) => {
+                    if (data?.setup && data?.delivery) return `😂 *${data.setup}*\n\n👉 _${data.delivery}_`;
+                    if (data?.joke) return `😂 ${data.joke}`;
+                    throw new Error('empty');
+                }),
+                httpClient.get('https://official-joke-api.appspot.com/random_joke', { timeout: 6000 }).then(({ data }) => {
+                    if (!data?.setup) throw new Error('empty');
+                    return `😂 *${data.setup}*\n\n👉 _${data.punchline}_`;
+                })
+            ]);
+            await ctx.reply(text);
         }
     },
     {
@@ -411,7 +443,10 @@ const commands = [
         handler: async (ctx) => {
             const ref = (ctx.args[0] || '1:1').trim();
             if (!/^\d+:\d+$/.test(ref)) return ctx.reply(`Usage: *${ctx.prefix}quran 2:255* ya *${ctx.prefix}quran 1:1*`);
-            const { data } = await axios.get(`https://api.alquran.cloud/v1/ayah/${ref}/editions/quran-uthmani,ur.jalandhry`, { timeout: 10000 });
+            const data = await withTtlCache(`quran:${ref}`, 1800000, async () => {
+                const r = await httpClient.get(`https://api.alquran.cloud/v1/ayah/${ref}/editions/quran-uthmani,ur.jalandhry`, { timeout: 8000 });
+                return r.data;
+            });
             const ar = data?.data?.[0];
             const ur = data?.data?.[1];
             if (!ar) return ctx.reply('❌ Ayah nahi mili.');
@@ -429,7 +464,10 @@ const commands = [
         desc: 'Shehar ke daily Namaz timings (.namaz Lahore)',
         handler: async (ctx) => {
             const city = ctx.fullArgs || 'Lahore';
-            const { data } = await axios.get(`https://api.aladhan.com/v1/timingsByCity?city=${encodeURIComponent(city)}&country=&method=1`, { timeout: 10000 });
+            const data = await withTtlCache(`namaz:${city.toLowerCase()}`, 1800000, async () => {
+                const r = await httpClient.get(`https://api.aladhan.com/v1/timingsByCity?city=${encodeURIComponent(city)}&country=&method=1`, { timeout: 8000 });
+                return r.data;
+            });
             const t = data?.data?.timings;
             if (!t) return ctx.reply('❌ City ke namaz timings nahi mile.');
             await ctx.reply(

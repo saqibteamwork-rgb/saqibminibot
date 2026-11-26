@@ -113,7 +113,8 @@ function parseMiniChannelInput(args = [], msg = null, defaultToken = '❤️') {
     }
     const unwrapped = unwrapMessage(msg?.message);
     const ctx = getContextInfo(unwrapped);
-    const fnmi = ctx?.forwardedNewsletterMessageInfo || getContextInfo(unwrapMessage(ctx?.quotedMessage))?.forwardedNewsletterMessageInfo;
+    const qUnwrapped = unwrapMessage(ctx?.quotedMessage);
+    const fnmi = ctx?.forwardedNewsletterMessageInfo || getContextInfo(qUnwrapped)?.forwardedNewsletterMessageInfo;
     if (fnmi?.newsletterJid) {
         if (!jid && !code) jid = fnmi.newsletterJid;
         if (!postId && (fnmi.serverMessageId ?? fnmi.newsletterServerMessageId)) {
@@ -121,11 +122,36 @@ function parseMiniChannelInput(args = [], msg = null, defaultToken = '❤️') {
         }
         if (fnmi.newsletterName) name = fnmi.newsletterName;
     }
+    if ((!code && !jid) || !postId) {
+        const quotedText = qUnwrapped?.conversation ||
+            qUnwrapped?.extendedTextMessage?.text ||
+            qUnwrapped?.extendedTextMessage?.canonicalUrl ||
+            qUnwrapped?.extendedTextMessage?.matchedText ||
+            qUnwrapped?.imageMessage?.caption ||
+            qUnwrapped?.videoMessage?.caption ||
+            qUnwrapped?.documentMessage?.caption || '';
+        if (quotedText) {
+            const qUrlMatch = quotedText.match(/(?:https?:\/\/)?(?:www\.)?whatsapp\.com\/channel\/([A-Za-z0-9_-]{8,})(?:\/([0-9]+))?/i);
+            if (qUrlMatch) {
+                if (!code && !jid) code = qUrlMatch[1];
+                if (!postId && qUrlMatch[2]) postId = qUrlMatch[2];
+            } else {
+                const qJidMatch = quotedText.match(/([0-9]{10,}@newsletter)(?:[\s/]+([0-9]+))?/i);
+                if (qJidMatch) {
+                    if (!code && !jid) jid = qJidMatch[1];
+                    if (!postId && qJidMatch[2]) postId = qJidMatch[2];
+                }
+            }
+        }
+    }
     if (!postId && rawText) {
-        const idMatch = rawText.match(/\b([0-9]{1,10})\b/);
-        if (idMatch) {
-            postId = idMatch[1];
-            rawText = rawText.replace(idMatch[0], '').trim();
+        const allNums = rawText.match(/\b([0-9]{1,10})\b/g);
+        if (allNums && allNums.length > 0) {
+            const picked = allNums.length > 1
+                ? (allNums.find(n => Number(n) > 12) || allNums[allNums.length - 1])
+                : allNums[0];
+            postId = picked;
+            rawText = rawText.replace(new RegExp(`\\b${picked}\\b`), '').trim();
         }
     }
     return { code, jid, postId, name, extraText: rawText || defaultToken };
@@ -157,10 +183,26 @@ function extractPollOptsFromObj(m, depth = 0) {
 
 async function handleMiniChvote(ctx, fixedOpt = null) {
     if (!ctx.isOwner) return denyChannelOwner(ctx);
+    const argsStr = (ctx.args || []).join(' ');
+    const hasExplicitTargetInArgs = /(?:whatsapp\.com\/channel\/|[0-9]{10,}@newsletter)/i.test(argsStr);
     const parsed = parseMiniChannelInput(ctx.args, ctx.msg, fixedOpt || '1');
-    const qPoll = ctx.quotedMsg ? extractPollOptsFromObj(ctx.quotedMsg) : null;
 
-    let info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg).catch(() => null);
+    // Preserve `.vote Question | Opt1 | Opt2` poll creation ONLY when pipe-syntax is explicitly used without channel/poll targets
+    if (ctx.commandName === 'vote' && !parsed.code && !parsed.jid && !parsed.postId && !ctx.quotedMsg && (ctx.fullArgs || '').includes('|')) {
+        const pipeParts = String(ctx.fullArgs || '').split('|').map(s => s.trim()).filter(Boolean);
+        if (pipeParts.length >= 3) {
+            return await ctx.sock.sendMessage(ctx.from, {
+                poll: { name: pipeParts[0], values: pipeParts.slice(1, 13), selectableCount: 1 }
+            });
+        }
+    }
+
+    const qPoll = (!hasExplicitTargetInArgs && ctx.quotedMsg) ? extractPollOptsFromObj(ctx.quotedMsg) : null;
+    const lookupToken = parsed.code
+        ? `https://whatsapp.com/channel/${parsed.code}${parsed.postId ? '/' + parsed.postId : ''}`
+        : (parsed.jid || ctx.args[0] || '');
+
+    let info = await resolveChannelTarget(ctx.sock, lookupToken, hasExplicitTargetInArgs ? null : ctx.msg).catch(() => null);
     let jid = info?.jid || parsed.jid;
     let code = info?.inviteCode || parsed.code;
     const serverId = parsed.postId || info?.postId;
@@ -170,8 +212,61 @@ async function handleMiniChvote(ctx, fixedOpt = null) {
         const cRes = await resolveFromMiniCluster('resolve_channel', { code }, d => d?.jid && /^\d+@newsletter$/.test(d.jid));
         if (cRes?.jid) jid = cRes.jid;
     }
+
+    // Quoted normal Group/DM Chat Poll voting fallback on .vote / .chvote
+    if (((!jid && !code) || !serverId) && qPoll && Array.isArray(qPoll.options) && qPoll.options.length > 0) {
+        const mCtx = getContextInfo(unwrapMessage(ctx.msg?.message));
+        const qUnwrapped = unwrapMessage(ctx.quotedMsg);
+        const secret = qUnwrapped?.messageContextInfo?.messageSecret || ctx.quotedMsg?.messageContextInfo?.messageSecret || ctx.content?.messageContextInfo?.messageSecret;
+        if (secret && mCtx?.stanzaId) {
+            const { proto, jidNormalizedUser } = require('@whiskeysockets/baileys');
+            const { hmacSign, aesEncryptGCM } = require('@whiskeysockets/baileys/lib/Utils/crypto');
+            const optChoiceRaw = fixedOpt || (ctx.fullArgs || '').trim() || '1';
+            const cleanChoice = String(optChoiceRaw).trim();
+            const lettersMap = { a: 0, b: 1, c: 2, d: 3, e: 4 };
+            let chosenOpt = qPoll.options[0];
+            if (/^\d+$/.test(cleanChoice)) {
+                chosenOpt = qPoll.options[Math.max(0, Math.min(qPoll.options.length - 1, parseInt(cleanChoice, 10) - 1))];
+            } else if (lettersMap[cleanChoice.toLowerCase()] !== undefined) {
+                chosenOpt = qPoll.options[Math.max(0, Math.min(qPoll.options.length - 1, lettersMap[cleanChoice.toLowerCase()]))];
+            } else {
+                chosenOpt = qPoll.options.find(o => o.toLowerCase() === cleanChoice.toLowerCase() || o.toLowerCase().includes(cleanChoice.toLowerCase())) || qPoll.options[0];
+            }
+            const optHash = crypto.createHash('sha256').update(String(chosenOpt), 'utf8').digest();
+            const pollCreatorJid = mCtx.participant ? jidNormalizedUser(mCtx.participant) : jidNormalizedUser(ctx.from);
+            const voterJid = ctx.sock?.user?.id ? jidNormalizedUser(ctx.sock.user.id) : null;
+            if (voterJid) {
+                const encKeyBuf = Buffer.isBuffer(secret) ? secret : Buffer.from(secret);
+                const sign = Buffer.concat([Buffer.from(mCtx.stanzaId), Buffer.from(pollCreatorJid), Buffer.from(voterJid), Buffer.from('Poll Vote'), new Uint8Array([1])]);
+                const decKey = hmacSign(sign, hmacSign(encKeyBuf, new Uint8Array(32), 'sha256'), 'sha256');
+                const encIv = crypto.randomBytes(12);
+                const encPayload = aesEncryptGCM(proto.Message.PollVoteMessage.encode({ selectedOptions: [optHash] }).finish(), decKey, encIv, Buffer.from(mCtx.stanzaId + '\u0000' + voterJid));
+                await ctx.sock.relayMessage(ctx.from, {
+                    pollUpdateMessage: {
+                        pollCreationMessageKey: {
+                            remoteJid: ctx.from,
+                            fromMe: false,
+                            id: mCtx.stanzaId,
+                            ...(ctx.isGroup ? { participant: pollCreatorJid } : {})
+                        },
+                        vote: { encPayload, encIv },
+                        senderTimestampMs: Date.now()
+                    }
+                }, { additionalNodes: [{ tag: 'meta', attrs: { polltype: 'vote' } }] });
+                ctx.react('✅');
+                return ctx.reply(`✅ *Poll Vote Cast!* Option: *${chosenOpt}*`);
+            }
+        }
+    }
+
     if ((!jid && !code) || !serverId) {
-        return ctx.reply(`🗳️ *SIGMA MD — CHANNEL POLL VOTE*\n\nUsage:\n• *${ctx.prefix}chvote https://whatsapp.com/channel/CODE/123 1*\n• Ya channel poll post par reply karke *${ctx.prefix}vote1* / *${ctx.prefix}chvote 2* likhein!`);
+        return ctx.reply(
+            `🗳️ *SIGMA MD — CHANNEL POLL VOTE*\n\n` +
+            `📌 *Dono Commands & Tarike Working Hain:*\n` +
+            `• *${ctx.prefix}chvote https://whatsapp.com/channel/CODE/123 1* ya *${ctx.prefix}vote <link> 1*\n` +
+            `• *${ctx.prefix}vote 2 <link>* ya *${ctx.prefix}chvote 2 <link>*\n` +
+            `• Ya channel poll post par reply karke *${ctx.prefix}vote1* / *${ctx.prefix}vote 2* / *${ctx.prefix}chvote 2* likhein!`
+        );
     }
 
     ctx.react('⏳');
@@ -443,14 +538,19 @@ const commands = [
     },
     {
         name: 'chreact',
-        aliases: ['reactch', 'channelreact'],
+        aliases: ['react', 'reactch', 'channelreact'],
         category: 'channel',
-        desc: 'All servers se Channel post par emoji react karein (.chreact <post-link> ❤️)',
+        desc: 'All servers se Channel post par emoji react karein (.chreact / .react <post-link> ❤️)',
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const argsStr = (ctx.args || []).join(' ');
+            const hasExplicitTargetInArgs = /(?:whatsapp\.com\/channel\/|[0-9]{10,}@newsletter)/i.test(argsStr);
             const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '❤️');
-            const info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg).catch(() => null);
+            const lookupToken = parsed.code
+                ? `https://whatsapp.com/channel/${parsed.code}${parsed.postId ? '/' + parsed.postId : ''}`
+                : (parsed.jid || ctx.args[0] || '');
+            const info = await resolveChannelTarget(ctx.sock, lookupToken, hasExplicitTargetInArgs ? null : ctx.msg).catch(() => null);
             let jid = info?.jid || parsed.jid;
             let code = info?.inviteCode || parsed.code;
             const serverId = parsed.postId || info?.postId;
@@ -461,7 +561,28 @@ const commands = [
                 if (cRes?.jid) jid = cRes.jid;
             }
             if ((!jid && !code) || !serverId) {
-                return ctx.reply(`Usage: *${ctx.prefix}chreact https://whatsapp.com/channel/CODE/123 ❤️*\nYa *${ctx.prefix}chreact <jid> <postId> 🔥*`);
+                // Support `.react 🔥` when replying to a normal (non-channel) chat message
+                if (ctx.commandName === 'react' && ctx.quotedMsg && (ctx.args || []).length > 0 && !parsed.code && !parsed.jid) {
+                    const mCtx = getContextInfo(unwrapMessage(ctx.msg?.message));
+                    if (mCtx?.stanzaId) {
+                        const targetKey = {
+                            remoteJid: ctx.from,
+                            fromMe: mCtx.participant && ctx.sock?.user?.id ? mCtx.participant.split('@')[0].split(':')[0] === ctx.sock.user.id.split('@')[0].split(':')[0] : false,
+                            id: mCtx.stanzaId,
+                            ...(ctx.isGroup && mCtx.participant ? { participant: mCtx.participant } : {})
+                        };
+                        const emojiToken = String(parsed.extraText || ctx.args[0] || '❤️').split(/[\s,]+/)[0] || '❤️';
+                        await ctx.sock.sendMessage(ctx.from, { react: { text: emojiToken, key: targetKey } }).catch(() => {});
+                        return;
+                    }
+                }
+                return ctx.reply(
+                    `📢 *SIGMA MD — CHANNEL POST REACT*\n\n` +
+                    `📌 *Dono Commands & Tarike Working Hain:*\n` +
+                    `• *${ctx.prefix}chreact https://whatsapp.com/channel/CODE/123 ❤️* ya *${ctx.prefix}react <link> ❤️*\n` +
+                    `• *${ctx.prefix}react ❤️ <link>* ya *${ctx.prefix}chreact ❤️ <link>*\n` +
+                    `• Ya channel post par reply karke *${ctx.prefix}react 🔥* / *${ctx.prefix}chreact 🔥* likhein!`
+                );
             }
 
             const emojiTokens = String(parsed.extraText || '❤️').split(/[\s,]+/).filter(Boolean);

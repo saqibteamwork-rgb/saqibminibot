@@ -549,7 +549,7 @@ const commands = [
     },
     {
         name: 'poll',
-        aliases: ['vote'],
+        aliases: ['createpoll', 'mkpoll'],
         category: 'group',
         desc: 'WhatsApp poll banayein (.poll Sawaal | Opt1 | Opt2)',
         handler: async (ctx) => {

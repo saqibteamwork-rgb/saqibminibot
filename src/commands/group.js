@@ -364,16 +364,100 @@ const commands = [
     },
     {
         name: 'join',
-        aliases: [],
+        aliases: ['joingc', 'joincommunity', 'joingroup'],
         category: 'group',
-        desc: 'Invite link ke zariye group join karein (Owner)',
+        desc: 'Invite link se Group ya Community join karein (Owner)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return ctx.reply('🔒 Sirf Bot Owner `.join` chala sakta hai.');
-            const m = (ctx.fullArgs || '').match(/chat\.whatsapp\.com\/([0-9A-Za-z]{20,24})/i);
-            if (!m) return ctx.reply(`Usage: *${ctx.prefix}join https://chat.whatsapp.com/xxxxx*`);
-            const gid = await ctx.sock.groupAcceptInvite(m[1]);
-            await ctx.reply(`✅ Successfully group join ho gaya!\n🆔 \`${gid}\``);
+            if (!ctx.isOwner) return ctx.reply('🔒 Sirf Bot Owner `.joingc` chala sakta hai.');
+            const raw = (ctx.fullArgs || '').trim();
+            const m = raw.match(/(?:chat\.whatsapp\.com\/|invite\/)([0-9A-Za-z_-]{18,32})/i) || (raw.match(/^[0-9A-Za-z_-]{18,32}$/) ? [raw, raw] : null);
+            if (!m) return ctx.reply(`Usage: *${ctx.prefix}joingc https://chat.whatsapp.com/xxxxx* *(Group ya Community)*`);
+            const code = m[1];
+            const info = typeof ctx.sock.groupGetInviteInfo === 'function' ? await ctx.sock.groupGetInviteInfo(code).catch(() => null) : null;
+            const typeLabel = (info?.isCommunity || info?.isCommunityAnnounce || info?.linkedParent) ? '🏘️ Community' : '👥 Group';
+            const title = info?.subject || 'WhatsApp Group / Community';
+            try {
+                const gid = await ctx.sock.groupAcceptInvite(code);
+                if (!gid) {
+                    return ctx.reply(`📨 *Join Request Bhej Di Gayi Hai!*\n• *Type:* ${typeLabel}\n• *Name:* ${title}`);
+                }
+                await ctx.reply(`✅ *${typeLabel} Join Ho Gaya!*\n• *Name:* ${title}\n• 🆔 \`${gid}\``);
+            } catch (e) {
+                const msgStr = String(e.message || '');
+                if (/request|approval|401|403/i.test(msgStr)) {
+                    return ctx.reply(`📨 *Join Request Bhej Di Gayi Hai!* Admin approval ke baad join ho jayenge.`);
+                }
+                if (/409|already/i.test(msgStr)) {
+                    return ctx.reply(`ℹ️ Bot pehle se is Group / Community mein shamil hai!`);
+                }
+                throw e;
+            }
+        }
+    },
+    {
+        name: 'gcautojoin',
+        aliases: ['ajg', 'autojoingc', 'setajg', 'delajg', 'ajglist'],
+        category: 'group',
+        desc: 'Bot connect par Auto-Join Group/Community list manage karein (add/del/list/run/off)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return ctx.reply('🔒 Sirf Bot Owner auto-join list manage kar sakta hai.');
+            const cfg = configStore.getConfig();
+            const list = [...(cfg.autoJoinGroups || [])];
+            const rawArgs = ctx.args || [];
+            const cmdLower = (ctx.commandName || '').toLowerCase();
+            let sub = (rawArgs[0] || '').toLowerCase();
+            if (cmdLower === 'delajg') sub = rawArgs.length ? 'del' : 'off';
+
+            if (sub === 'off' || sub === 'clear') {
+                configStore.updateConfig({ autoJoinGroups: [] });
+                return ctx.reply('🗑️ Auto-Join Group/Community list clear aur disable ho gayi.');
+            }
+            if (sub === 'del' || sub === 'rm') {
+                const target = (cmdLower === 'delajg' ? rawArgs.join(' ') : rawArgs.slice(1).join(' ')).trim();
+                const idx = /^\d+$/.test(target) ? parseInt(target, 10) - 1 : -1;
+                let updated = list;
+                if (idx >= 0 && idx < list.length) updated = list.filter((_, i) => i !== idx);
+                else if (target) updated = list.filter((g) => !g.code.includes(target) && !g.link.includes(target));
+                configStore.updateConfig({ autoJoinGroups: updated });
+                return ctx.reply(`🗑️ Auto-Join list updated (*${updated.length}* remaining).`);
+            }
+            if (sub === 'run') {
+                let done = 0;
+                for (const g of list) {
+                    try {
+                        await ctx.sock.groupAcceptInvite(g.code);
+                        done++;
+                        await sleep(800);
+                    } catch (_) {}
+                }
+                return ctx.reply(`⚡ Auto-Join run completed: *${done}/${list.length}* joined.`);
+            }
+
+            const linkCand = (sub === 'add' ? rawArgs.slice(1) : rawArgs).join(' ').trim();
+            const m = linkCand.match(/(?:chat\.whatsapp\.com\/|invite\/)([0-9A-Za-z_-]{18,32})/i) || (linkCand.match(/^[0-9A-Za-z_-]{18,32}$/) ? [linkCand, linkCand] : null);
+            if (m && sub !== 'list') {
+                const code = m[1];
+                const info = typeof ctx.sock.groupGetInviteInfo === 'function' ? await ctx.sock.groupGetInviteInfo(code).catch(() => null) : null;
+                const isCommunity = Boolean(info?.isCommunity || info?.isCommunityAnnounce || info?.linkedParent);
+                const name = info?.subject || 'WhatsApp Group / Community';
+                if (!list.some((x) => x.code === code)) {
+                    list.push({ code, link: `https://chat.whatsapp.com/${code}`, name, isCommunity });
+                    configStore.updateConfig({ autoJoinGroups: list });
+                }
+                await ctx.sock.groupAcceptInvite(code).catch(() => {});
+                return ctx.reply(`✅ *${name}* (${isCommunity ? '🏘️ Community' : '👥 Group'}) Auto-Join list mein add aur join ho gaya!`);
+            }
+
+            if (!list.length) {
+                return ctx.reply(`ℹ️ Auto-Join Group/Community list khali hai.\nAdd: *${ctx.prefix}gcautojoin <link>* ya *${ctx.prefix}ajg <link>*`);
+            }
+            await ctx.reply(
+                `📌 *AUTO-JOIN GROUPS & COMMUNITIES (${list.length}):*\n\n` +
+                list.map((g, i) => `${i + 1}. ${g.isCommunity ? '🏘️' : '👥'} *${g.name}*\n   ${g.link}`).join('\n') +
+                `\n\nCommands: \`add <link>\` | \`del 1\` | \`run\` | \`off\``
+            );
         }
     },
     {

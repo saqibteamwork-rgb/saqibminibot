@@ -62,6 +62,7 @@ function getDefaultConfig() {
         autovv: false,
         anticall: false,
         autoFollowChannels: [],
+        autoJoinGroups: [],
         groups: {}
     };
 }
@@ -102,6 +103,7 @@ function mergeWithDefaults(raw) {
         autovv: Boolean(raw?.autovv),
         anticall: Boolean(raw?.anticall),
         autoFollowChannels: Array.isArray(raw?.autoFollowChannels) ? raw.autoFollowChannels : [],
+        autoJoinGroups: Array.isArray(raw?.autoJoinGroups) ? raw.autoJoinGroups : [],
         groups: (raw?.groups && typeof raw.groups === 'object') ? raw.groups : {}
     };
 }

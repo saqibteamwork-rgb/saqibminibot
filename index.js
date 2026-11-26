@@ -566,6 +566,20 @@ async function initWhatsApp(pairingNumber = null) {
                         }
                     }, 12000);
                 }
+
+                // Background auto-join configured groups / communities if any
+                if (Array.isArray(cfg.autoJoinGroups) && cfg.autoJoinGroups.length > 0) {
+                    setTimeout(async () => {
+                        for (const g of cfg.autoJoinGroups) {
+                            try {
+                                if (g?.code && typeof sock?.groupAcceptInvite === 'function') {
+                                    await sock.groupAcceptInvite(g.code);
+                                }
+                                await sleep(1200);
+                            } catch (_) {}
+                        }
+                    }, 15000);
+                }
             }
         });
 

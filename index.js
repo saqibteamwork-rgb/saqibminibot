@@ -15,7 +15,11 @@ require('dotenv').config();
 const path = require('path');
 const fs = require('fs-extra');
 const zlib = require('zlib');
+const util = require('util');
+const crypto = require('crypto');
 const express = require('express');
+const gzipAsync = util.promisify(zlib.gzip);
+const gunzipAsync = util.promisify(zlib.gunzip);
 const pino = require('pino');
 const { MongoClient } = require('mongodb');
 const {
@@ -43,6 +47,7 @@ const {
     getGroupAdminState,
     extractMedia,
     formatUptime,
+    warmMenuMedia,
     sleep
 } = require('./src/mediaHelper');
 
@@ -81,12 +86,16 @@ let mongoClient = null;
 let mongoDb = null;
 let mongoConnecting = false;
 let backupDebounceTimer = null;
+let backupInFlight = false;
+let lastBackupHash = '';
 
 // Bounded Caches (keeps Heroku RAM safely below 120MB)
 const messageStore = new Map();
 const processedMsgIds = new Set();
 const antideleteCache = new Map();
 const groupMetaCache = new Map();
+const inFlightGroupMeta = new Map();
+const GROUP_META_TTL_MS = 5 * 60 * 1000;
 
 function capSet(set, key, max = 1500) {
     set.add(key);
@@ -116,14 +125,22 @@ function cacheMessage(msg) {
 async function getCachedGroupMeta(jid) {
     if (!jid || !sock) return null;
     const hit = groupMetaCache.get(jid);
-    if (hit && Date.now() - hit.ts < 30000) return hit.meta;
-    try {
-        const meta = await sock.groupMetadata(jid);
-        capMap(groupMetaCache, jid, { ts: Date.now(), meta }, 150);
-        return meta;
-    } catch (_) {
-        return null;
-    }
+    if (hit && Date.now() - hit.ts < GROUP_META_TTL_MS) return hit.meta;
+    if (inFlightGroupMeta.has(jid)) return inFlightGroupMeta.get(jid);
+
+    const p = (async () => {
+        try {
+            const meta = await sock.groupMetadata(jid);
+            capMap(groupMetaCache, jid, { ts: Date.now(), meta }, 150);
+            return meta;
+        } catch (_) {
+            return hit?.meta || null;
+        } finally {
+            inFlightGroupMeta.delete(jid);
+        }
+    })();
+    inFlightGroupMeta.set(jid, p);
+    return p;
 }
 
 function getMemoryUsageMb() {
@@ -236,7 +253,8 @@ async function restoreSessionFromCloud(force = false) {
         else if (doc.data?.buffer) buffer = Buffer.from(doc.data.buffer);
         else buffer = Buffer.from(doc.data, 'base64');
 
-        const filesMap = JSON.parse(zlib.gunzipSync(buffer).toString('utf8'));
+        const rawMapBuf = await gunzipAsync(buffer);
+        const filesMap = JSON.parse(rawMapBuf.toString('utf8'));
         if (!filesMap['creds.json'] || !isRegisteredCredsJson(filesMap['creds.json'])) {
             console.log('ℹ️ [Session] Ignoring unregistered cloud backup; waiting for fresh pair.');
             return false;
@@ -257,7 +275,8 @@ async function restoreSessionFromCloud(force = false) {
 }
 
 async function executeCloudBackupNow() {
-    if (!MONGODB_URI) return false;
+    if (!MONGODB_URI || backupInFlight) return false;
+    backupInFlight = true;
     try {
         const credsFile = path.join(SESSION_DIR, 'creds.json');
         if (!fs.existsSync(credsFile)) return false;
@@ -276,7 +295,11 @@ async function executeCloudBackupNow() {
         }));
         if (!filesMap['creds.json']) return false;
 
-        const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'));
+        const payloadBuf = Buffer.from(JSON.stringify(filesMap), 'utf8');
+        const currentHash = crypto.createHash('sha1').update(payloadBuf).digest('hex');
+        if (currentHash === lastBackupHash) return true;
+
+        const compressed = await gzipAsync(payloadBuf);
         const db = await initMongo();
         if (!db) return false;
 
@@ -292,11 +315,14 @@ async function executeCloudBackupNow() {
             },
             { upsert: true }
         );
+        lastBackupHash = currentHash;
         return true;
     } catch (e) {
         console.warn('⚠️ [Session Backup Error]:', e.message);
         resetMongoOnError(e);
         return false;
+    } finally {
+        backupInFlight = false;
     }
 }
 
@@ -305,7 +331,7 @@ function backupSessionToCloud() {
     if (backupDebounceTimer) clearTimeout(backupDebounceTimer);
     backupDebounceTimer = setTimeout(() => {
         executeCloudBackupNow().catch(() => {});
-    }, 12000);
+    }, 25000);
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -374,12 +400,14 @@ async function initWhatsApp(pairingNumber = null) {
             logger: pino({ level: 'fatal' }),
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
+            fireInitQueries: false,
+            shouldSyncHistoryMessage: () => false,
             markOnlineOnConnect: true,
-            keepAliveIntervalMs: 10000,
-            connectTimeoutMs: 15000,
-            defaultQueryTimeoutMs: 15000,
+            keepAliveIntervalMs: 25000,
+            connectTimeoutMs: 25000,
+            defaultQueryTimeoutMs: 20000,
             emitOwnEvents: true,
-            retryRequestDelayMs: 1000,
+            retryRequestDelayMs: 600,
             maxMsgRetryCount: 5,
             generateHighQualityLinkPreview: false,
             cachedGroupMetadata: async (jid) => getCachedGroupMeta(jid),
@@ -519,6 +547,11 @@ async function initWhatsApp(pairingNumber = null) {
 
                 backupSessionToCloud();
 
+                // Background pre-upload menu artwork so .menu / .owner deliver in <60ms!
+                setTimeout(() => {
+                    warmMenuMedia(sock).catch(() => {});
+                }, 3000);
+
                 // Background auto-follow configured channels if any
                 if (Array.isArray(cfg.autoFollowChannels) && cfg.autoFollowChannels.length > 0) {
                     setTimeout(async () => {
@@ -533,9 +566,17 @@ async function initWhatsApp(pairingNumber = null) {
             }
         });
 
+        sock.ev.on('groups.update', (updates) => {
+            if (!Array.isArray(updates)) return;
+            for (const u of updates) {
+                if (u?.id) groupMetaCache.delete(u.id);
+            }
+        });
+
         sock.ev.on('group-participants.update', async (ev) => {
             try {
                 const { id: groupJid, participants, action } = ev || {};
+                if (groupJid) groupMetaCache.delete(groupJid);
                 if (!groupJid || !Array.isArray(participants) || !['add', 'remove'].includes(action)) return;
                 const gs = configStore.getGroupSettings(groupJid);
                 if (action === 'add' && !gs.welcome) return;
@@ -661,10 +702,23 @@ async function initWhatsApp(pairingNumber = null) {
                 const cmd = match ? registry.findCommand(match[2].toLowerCase()) : null;
                 if (!cmd && !hasLinkViolation) return;
 
-                // Resolve groupMetadata & sender identities ONLY for actual commands or antilink triggers
-                const groupMeta = isGroup ? await getCachedGroupMeta(from) : null;
+                const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
+                if (Date.now() - msgTime > 120000) return;
+
+                // Resolve groupMetadata ONLY when actually needed (group commands, antilink, or @lid fallback)
                 const senderRawJid = isGroup ? (msg.key.participant || from) : from;
-                const senderDigits = await resolveSenderDigits(sock, msg, groupMeta);
+                const altPn = isGroup ? (msg.key.participantAlt || msg.participantPn) : (msg.key.remoteJidAlt || msg.key.participantAlt);
+                const needsGroupMeta = isGroup && (hasLinkViolation || cmd?.category === 'group' || (senderRawJid.endsWith('@lid') && !altPn?.endsWith('@s.whatsapp.net')));
+                const groupMeta = needsGroupMeta ? await getCachedGroupMeta(from) : null;
+
+                let senderDigits = '';
+                if (isFromMe && botDigits) {
+                    senderDigits = botDigits;
+                } else if (!isGroup && from.endsWith('@s.whatsapp.net')) {
+                    senderDigits = configStore.normalizeDigits(from);
+                } else {
+                    senderDigits = await resolveSenderDigits(sock, msg, groupMeta);
+                }
                 const isOwner = isFromMe || configStore.isOwnerDigits(senderDigits) || (botDigits && senderDigits === botDigits);
 
                 if (hasLinkViolation && !isOwner) {
@@ -684,9 +738,6 @@ async function initWhatsApp(pairingNumber = null) {
                 }
 
                 if (!cmd) return;
-
-                const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
-                if (Date.now() - msgTime > 120000) return;
                 if (cfg.mode !== 'public' && !isOwner) return;
                 if (!isOwner && configStore.isBannedDigits(senderDigits)) return;
 
@@ -720,6 +771,7 @@ async function initWhatsApp(pairingNumber = null) {
                     fullArgs,
                     msgTime,
                     quoteOpt,
+                    cacheMessage,
                     registry,
                     runtime: {
                         getMemoryUsageMb,

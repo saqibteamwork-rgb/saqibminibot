@@ -4,11 +4,20 @@
  * SIGMA MD :: Shared Baileys v7 JID, Unwrap, Media, Channel & Security Helpers
  */
 
+const fs = require('fs');
+const path = require('path');
 const http = require('http');
 const https = require('https');
 const net = require('net');
 const axios = require('axios');
-const { downloadContentFromMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
+const {
+    downloadContentFromMessage,
+    jidNormalizedUser,
+    areJidsSameUser,
+    prepareWAMessageMedia,
+    generateWAMessageFromContent,
+    proto
+} = require('@whiskeysockets/baileys');
 const { normalizeDigits } = require('./configStore');
 
 // Persistent Keep-Alive HTTP client (reuses TCP/TLS sockets for faster API calls)
@@ -411,10 +420,9 @@ function toSansBold(str) {
     });
 }
 
-const MENU_IMAGE_PATH = require('path').join(__dirname, '..', 'assets', 'sigma_menu.png');
+const MENU_IMAGE_PATH = path.join(__dirname, '..', 'assets', 'sigma_menu.png');
 let PRELOADED_MENU_IMAGE = null;
 try {
-    const fs = require('fs');
     if (fs.existsSync(MENU_IMAGE_PATH)) {
         PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
     }
@@ -423,12 +431,52 @@ try {
 function getMenuImageBuffer() {
     if (PRELOADED_MENU_IMAGE) return PRELOADED_MENU_IMAGE;
     try {
-        const fs = require('fs');
         if (fs.existsSync(MENU_IMAGE_PATH)) {
             PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
         }
     } catch (_) {}
     return PRELOADED_MENU_IMAGE;
+}
+
+const MENU_MEDIA_UPLOAD_TTL = 20 * 60 * 1000;
+const uploadedMenuCache = new WeakMap();
+const inFlightMenuUpload = new WeakMap();
+
+async function getCachedUploadedMenuMedia(sock, imgBuf) {
+    if (!sock || !imgBuf || typeof sock.waUploadToServer !== 'function' || typeof prepareWAMessageMedia !== 'function') {
+        return null;
+    }
+    const hit = uploadedMenuCache.get(sock);
+    if (hit && Date.now() - hit.at < MENU_MEDIA_UPLOAD_TTL && hit.imageMessage) {
+        return hit.imageMessage;
+    }
+    if (inFlightMenuUpload.has(sock)) {
+        return inFlightMenuUpload.get(sock);
+    }
+    const uploadPromise = (async () => {
+        try {
+            const prepared = await withTimeout(
+                prepareWAMessageMedia({ image: imgBuf }, { upload: sock.waUploadToServer }),
+                8000,
+                'Menu media pre-upload'
+            );
+            if (prepared?.imageMessage) {
+                uploadedMenuCache.set(sock, { at: Date.now(), imageMessage: prepared.imageMessage });
+                return prepared.imageMessage;
+            }
+        } catch (_) {}
+        return null;
+    })().finally(() => {
+        inFlightMenuUpload.delete(sock);
+    });
+    inFlightMenuUpload.set(sock, uploadPromise);
+    return uploadPromise;
+}
+
+async function warmMenuMedia(sock) {
+    const imgBuf = getMenuImageBuffer();
+    if (!imgBuf) return null;
+    return getCachedUploadedMenuMedia(sock, imgBuf);
 }
 
 function getPrimaryOwnerDigits(cfg) {
@@ -466,11 +514,53 @@ async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card')
     const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
 
     if (imgBuf) {
+        // Fast path: relay pre-uploaded WhatsApp imageMessage (skips 77KB re-encrypt + CDN upload -> <60ms!)
+        if (typeof ctx.sock?.relayMessage === 'function' && typeof generateWAMessageFromContent === 'function') {
+            try {
+                const cachedImg = await getCachedUploadedMenuMedia(ctx.sock, imgBuf);
+                if (cachedImg) {
+                    const botPn = ctx.sock?.user?.id ? jidNormalizedUser(ctx.sock.user.id) : null;
+                    const botLid = ctx.sock?.user?.lid ? jidNormalizedUser(ctx.sock.user.lid) : null;
+                    let targetJid = ctx.from ? jidNormalizedUser(ctx.from) : ctx.from;
+                    if (botPn && targetJid && !targetJid.endsWith('@g.us') && !targetJid.endsWith('@newsletter')) {
+                        if ((botLid && areJidsSameUser(targetJid, botLid)) || areJidsSameUser(targetJid, botPn)) {
+                            targetJid = botPn;
+                        }
+                    }
+                    const isSelf = Boolean(botPn && targetJid && (botPn === targetJid || areJidsSameUser(botPn, targetJid)));
+                    const safeQuoted = (ctx.msg?.message && !ctx.msg.key?.fromMe && !isSelf) ? ctx.msg : undefined;
+
+                    const clonedImg = proto?.Message?.ImageMessage?.toObject
+                        ? proto.Message.ImageMessage.toObject(cachedImg)
+                        : { ...cachedImg };
+                    clonedImg.caption = captionText;
+                    if (newsletterCtx) clonedImg.contextInfo = newsletterCtx;
+                    else delete clonedImg.contextInfo;
+
+                    const waMsg = generateWAMessageFromContent(
+                        targetJid,
+                        { imageMessage: clonedImg },
+                        { userJid: botPn || ctx.sock.user?.id, ...(safeQuoted ? { quoted: safeQuoted } : {}) }
+                    );
+                    await withTimeout(
+                        ctx.sock.relayMessage(targetJid, waMsg.message, { messageId: waMsg.key.id }),
+                        8000,
+                        `${timeoutLabel} relay`
+                    );
+                    if (waMsg?.key?.id && waMsg?.message) ctx.cacheMessage?.(waMsg);
+                    return;
+                }
+            } catch (_) {
+                uploadedMenuCache.delete(ctx.sock);
+            }
+        }
+
         try {
-            await Promise.race([
+            await withTimeout(
                 ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: captionText, ...payloadBase }, replyOpts),
-                new Promise((_, reject) => setTimeout(() => reject(new Error(`${timeoutLabel} image send timeout`)), 8000))
-            ]);
+                8000,
+                `${timeoutLabel} image send`
+            );
             return;
         } catch (_) {}
     }
@@ -501,6 +591,7 @@ module.exports = {
     formatUptime,
     toSansBold,
     getMenuImageBuffer,
+    warmMenuMedia,
     getPrimaryOwnerDigits,
     formatReadablePhone,
     buildNewsletterContext,

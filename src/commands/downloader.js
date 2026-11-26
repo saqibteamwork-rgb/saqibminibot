@@ -181,14 +181,14 @@ async function runPlay(ctx) {
 
 async function runVideo(ctx) {
     if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}video <video name or YouTube link>*`);
-    await ctx.react('🎬');
+    ctx.react('🎬');
     const r = await resolveYoutubeMedia(ctx.fullArgs, 'video');
     await ctx.sock.sendMessage(ctx.from, {
         video: { url: r.url },
         mimetype: 'video/mp4',
         caption: `🎬 *${r.title}*\n⏳ ${r.duration || 'HD'}\n⚡ _${configStore.getConfig().botName || 'SIGMA MD'}_`
     }, ctx.quoteOpt);
-    await ctx.react('✅');
+    ctx.react('✅');
 }
 
 async function runTiktok(ctx, audioOnly = false) {
@@ -196,7 +196,7 @@ async function runTiktok(ctx, audioOnly = false) {
     if (!url || !/(tiktok\.com|douyin\.com)/i.test(url)) {
         return ctx.reply(`Usage: *${ctx.prefix}${audioOnly ? 'ttmp3' : 'tiktok'} <tiktok link>*`);
     }
-    await ctx.react('⏳');
+    ctx.react('⏳');
     const data = await fetchTikWM(url);
     if (audioOnly && data.audioUrl) {
         await ctx.sock.sendMessage(ctx.from, { audio: { url: data.audioUrl }, mimetype: 'audio/mpeg' }, ctx.quoteOpt);
@@ -212,22 +212,22 @@ async function runTiktok(ctx, audioOnly = false) {
             caption: `🎵 *TikTok:* ${data.title}\n👤 *Author:* ${data.author}`
         }, ctx.quoteOpt);
     }
-    await ctx.react('✅');
+    ctx.react('✅');
 }
 
 async function runFb(ctx) {
     const url = ctx.args[0];
     if (!url || !/(facebook\.com|fb\.watch|fb\.com)/i.test(url)) return ctx.reply(`Usage: *${ctx.prefix}fb <facebook video link>*`);
-    await ctx.react('⏳');
+    ctx.react('⏳');
     const res = await fetchSocialMedia(url);
     await ctx.sock.sendMessage(ctx.from, { video: { url: res.url }, mimetype: 'video/mp4', caption: `📘 *Facebook Video:* ${res.title}` }, ctx.quoteOpt);
-    await ctx.react('✅');
+    ctx.react('✅');
 }
 
 async function runIg(ctx) {
     const url = ctx.args[0];
     if (!url || !/(instagram\.com|instagr\.am)/i.test(url)) return ctx.reply(`Usage: *${ctx.prefix}ig <instagram reel/post link>*`);
-    await ctx.react('⏳');
+    ctx.react('⏳');
     try {
         const home = await httpClient.get('https://saveinsta.to/en/highlights', { headers: { 'User-Agent': UA }, timeout: 7000 });
         const expMatch = home.data.match(/k_exp\s*=\s*["']([^"']+)["']/);
@@ -246,14 +246,14 @@ async function runIg(ctx) {
                 if (dl) {
                     const isVid = /\.(mp4|mov|webm)/i.test(dl) || /video/i.test(btnMatch?.[2] || '');
                     await ctx.sock.sendMessage(ctx.from, isVid ? { video: { url: dl }, caption: '📸 *Instagram Video*' } : { image: { url: dl }, caption: '📸 *Instagram Photo*' }, ctx.quoteOpt);
-                    return await ctx.react('✅');
+                    return ctx.react('✅');
                 }
             }
         }
     } catch (_) {}
     const fb = await fetchSocialMedia(url);
     await ctx.sock.sendMessage(ctx.from, { video: { url: fb.url }, caption: `📸 *Instagram:* ${fb.title}` }, ctx.quoteOpt);
-    await ctx.react('✅');
+    ctx.react('✅');
 }
 
 const commands = [
@@ -308,7 +308,7 @@ const commands = [
         handler: async (ctx) => {
             const url = ctx.args[0];
             if (!url || !url.includes('capcut.com')) return ctx.reply(`Usage: *${ctx.prefix}capcut <capcut link>*`);
-            await ctx.react('⏳');
+            ctx.react('⏳');
             let vid = null;
             let title = 'CapCut Template';
             const apis = [
@@ -503,7 +503,7 @@ const commands = [
         desc: 'Quoted View-Once image/video/audio recover karein',
         handler: async (ctx) => {
             if (!ctx.quotedMsg) return ctx.reply('❌ Kisi View-Once photo/video/voice par reply karke `.vv` bhejein.');
-            await ctx.react('🔓');
+            ctx.react('🔓');
             const media = await extractMedia(ctx.quotedMsg);
             if (!media) return ctx.reply('❌ View-Once media extract nahi ho saki (shayed client ne path strip kar diya ya expired hai).');
             const caption = `🔓 *Recovered View-Once (${media.mediaType.toUpperCase()})*${media.caption ? `\n📝 ${media.caption}` : ''}`;
@@ -513,7 +513,7 @@ const commands = [
                     ? { video: media.buffer, caption }
                     : { audio: media.buffer, mimetype: media.mimetype || 'audio/mp4', ptt: media.ptt };
             await ctx.sock.sendMessage(ctx.from, payload, ctx.quoteOpt);
-            await ctx.react('✅');
+            ctx.react('✅');
         }
     },
     {

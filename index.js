@@ -49,6 +49,7 @@ const {
     getGroupAdminState,
     extractMedia,
     formatUptime,
+    getMenuImageBuffer,
     warmMenuMedia,
     sleep
 } = require('./src/mediaHelper');
@@ -568,6 +569,25 @@ async function initWhatsApp(pairingNumber = null) {
             }
         });
 
+        const callNoticeCooldown = new Map();
+        sock.ev.on('call', async (calls) => {
+            if (!configStore.getConfig().anticall || !Array.isArray(calls)) return;
+            for (const call of calls) {
+                if (call?.status !== 'offer' || !call?.id || !call?.from) continue;
+                try {
+                    await sock.rejectCall(call.id, call.from).catch(() => {});
+                    const lastNotice = callNoticeCooldown.get(call.from) || 0;
+                    if (Date.now() - lastNotice > 30000) {
+                        capSet(callNoticeCooldown, call.from, 100);
+                        callNoticeCooldown.set(call.from, Date.now());
+                        await sock.sendMessage(call.from, {
+                            text: '🚫 *Auto Call Reject Active!*\nCalls allow nahi hain. Baraye meharbani sirf text message bhejein.'
+                        }).catch(() => {});
+                    }
+                } catch (_) {}
+            }
+        });
+
         sock.ev.on('groups.update', (updates) => {
             if (!Array.isArray(updates)) return;
             for (const u of updates) {
@@ -878,6 +898,15 @@ setInterval(() => {
 
 const app = express();
 app.use(express.json());
+app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d' }));
+
+app.get('/menu-preview', (req, res) => {
+    const imgBuf = getMenuImageBuffer();
+    if (!imgBuf) return res.status(404).end();
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(imgBuf);
+});
 
 app.get(['/health', '/ping'], (req, res) => {
     const cfg = configStore.getConfig();
@@ -961,32 +990,122 @@ app.get('/', (req, res) => {
     <title>${botNameHtml} — 24/7 Zero-Sleep</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: system-ui, -apple-system, sans-serif; background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-        .card { background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(255,255,255,0.1); border-radius: 24px; max-width: 480px; width: 100%; padding: 34px 26px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7); text-align: center; }
-        .badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; font-size: 13px; font-weight: 700; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
-        .dot { width: 10px; height: 10px; border-radius: 50%; background: ${statusColor}; box-shadow: 0 0 12px ${statusColor}; }
-        h1 { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
-        p.sub { color: #94a3b8; font-size: 14px; margin-bottom: 22px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 22px; }
-        .stat-box { background: rgba(30,41,59,0.7); border: 1px solid rgba(255,255,255,0.06); padding: 14px 8px; border-radius: 14px; }
-        .stat-val { font-size: 17px; font-weight: 700; color: #38bdf8; font-family: monospace; }
-        .stat-lbl { font-size: 11px; color: #64748b; margin-top: 4px; text-transform: uppercase; font-weight: 600; }
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: radial-gradient(circle at 20% 10%, #0b2942 0%, #070b14 55%, #04070e 100%);
+            color: #f8fafc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 22px 14px;
+        }
+        .card {
+            position: relative;
+            background: linear-gradient(165deg, rgba(15, 23, 42, 0.92), rgba(9, 13, 24, 0.96));
+            border: 1px solid rgba(56, 189, 248, 0.22);
+            border-radius: 26px;
+            max-width: 480px;
+            width: 100%;
+            padding: 24px 24px 28px;
+            box-shadow: 0 28px 60px -14px rgba(0,0,0,0.85), 0 0 40px -12px rgba(14,165,233,0.18);
+            text-align: center;
+            overflow: hidden;
+        }
+        .hero-banner {
+            position: relative;
+            margin: -24px -24px 0;
+            height: 120px;
+            background: url('/menu-preview') center 28% / cover no-repeat, linear-gradient(135deg, #082f49, #1e1b4b);
+            filter: saturate(1.15);
+        }
+        .hero-banner::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(180deg, rgba(7,11,20,0.22) 0%, rgba(12,18,34,0.96) 100%);
+        }
+        .avatar-wrap {
+            position: relative;
+            margin: -54px auto 12px;
+            width: 108px;
+            height: 108px;
+            z-index: 2;
+        }
+        .avatar-ring {
+            width: 108px;
+            height: 108px;
+            border-radius: 50%;
+            padding: 3px;
+            background: linear-gradient(135deg, #38bdf8, #3b82f6, #10b981);
+            box-shadow: 0 0 24px rgba(56, 189, 248, 0.45);
+        }
+        .avatar-ring img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+            display: block;
+            border: 3px solid #0b1120;
+        }
+        .status-orb {
+            position: absolute;
+            right: 5px;
+            bottom: 5px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: ${statusColor};
+            border: 3px solid #0b1120;
+            box-shadow: 0 0 12px ${statusColor};
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 999px;
+            font-size: 11px;
+            letter-spacing: 0.6px;
+            font-weight: 700;
+            background: rgba(15, 23, 42, 0.85);
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            margin-bottom: 12px;
+            color: #e2e8f0;
+        }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}; box-shadow: 0 0 10px ${statusColor}; }
+        h1 { font-size: 25px; font-weight: 800; letter-spacing: 0.4px; margin-bottom: 4px; background: linear-gradient(90deg, #ffffff, #7dd3fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        p.sub { color: #94a3b8; font-size: 13px; margin-bottom: 18px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
+        .stat-box { background: rgba(30,41,59,0.55); border: 1px solid rgba(56,189,248,0.12); padding: 12px 8px; border-radius: 14px; }
+        .stat-val { font-size: 16px; font-weight: 800; color: #38bdf8; font-family: monospace; }
+        .stat-lbl { font-size: 10px; color: #94a3b8; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
         .form-group { display: flex; flex-direction: column; gap: 10px; text-align: left; }
-        label { font-size: 13px; font-weight: 600; color: #cbd5e1; }
-        input { width: 100%; padding: 13px 15px; border-radius: 12px; background: #0f172a; border: 1px solid rgba(255,255,255,0.15); color: #fff; font-size: 15px; font-family: monospace; outline: none; }
+        label { font-size: 12px; font-weight: 600; color: #cbd5e1; }
+        input { width: 100%; padding: 13px 15px; border-radius: 12px; background: rgba(15,23,42,0.9); border: 1px solid rgba(56,189,248,0.22); color: #fff; font-size: 15px; font-family: monospace; outline: none; transition: border-color .2s; }
         input:focus { border-color: #38bdf8; }
-        button { width: 100%; padding: 14px; border-radius: 12px; background: linear-gradient(135deg, #0284c7, #2563eb); color: #fff; font-size: 15px; font-weight: 700; border: none; cursor: pointer; margin-top: 4px; }
+        button { width: 100%; padding: 14px; border-radius: 12px; background: linear-gradient(135deg, #0ea5e9, #2563eb); color: #fff; font-size: 15px; font-weight: 700; border: none; cursor: pointer; margin-top: 2px; box-shadow: 0 8px 20px -6px rgba(14,165,233,0.45); }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .code-box { display: none; margin-top: 18px; padding: 16px; background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); border-radius: 14px; }
+        .code-box { display: none; margin-top: 16px; padding: 16px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.35); border-radius: 14px; }
         .code-val { font-family: monospace; font-size: 30px; font-weight: 800; letter-spacing: 3px; color: #4ade80; margin: 8px 0; }
-        .footer { margin-top: 22px; font-size: 12px; color: #64748b; }
+        .art-preview { margin-top: 16px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(56,189,248,0.18); background: #060a14; }
+        .art-preview summary { cursor: pointer; padding: 9px 12px; font-size: 12px; font-weight: 600; color: #7dd3fc; list-style: none; user-select: none; }
+        .art-preview img { width: 100%; display: block; border-top: 1px solid rgba(255,255,255,0.08); }
+        .footer { margin-top: 18px; font-size: 11px; color: #64748b; }
     </style>
 </head>
 <body>
     <div class="card">
+        <div class="hero-banner"></div>
+        <div class="avatar-wrap">
+            <div class="avatar-ring">
+                <img src="/assets/sigma_avatar.jpg" alt="${ownerNameHtml}" onerror="this.src='/menu-preview'">
+            </div>
+            <span class="status-orb" title="${statusText}"></span>
+        </div>
         <div class="badge"><span class="dot"></span><span>${statusText}</span></div>
         <h1>⚡ ${botNameHtml}</h1>
-        <p class="sub">Baileys v7 &bull; ${totalCmds}+ Commands &bull; Zero-Sleep</p>
+        <p class="sub">Created by ${ownerNameHtml} &bull; ${totalCmds}+ Commands &bull; Zero-Sleep</p>
         <div class="stats-grid">
             <div class="stat-box"><div class="stat-val">${memMb}M</div><div class="stat-lbl">RAM</div></div>
             <div class="stat-box"><div class="stat-val">${uptimeStr}</div><div class="stat-lbl">Uptime</div></div>
@@ -1002,7 +1121,11 @@ app.get('/', (req, res) => {
             <div class="code-val" id="codeDisplay">----</div>
             <div style="font-size: 12px; color: #cbd5e1;">WhatsApp &gt; Linked Devices &gt; Link with Phone Number</div>
         </div>
-        <div style="margin-top: 16px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px;">
+        <details class="art-preview">
+            <summary>🖼️ View ${botNameHtml} Signature Menu Card</summary>
+            <img src="/menu-preview" alt="${botNameHtml} Menu Card" loading="lazy">
+        </details>
+        <div style="margin-top: 14px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px;">
             <a href="${miniPairHref}" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: none; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(56,189,248,0.3); background: rgba(56,189,248,0.08);">🤖 Mini Bot Pair</a>
             <a href="${mainPairHref}" target="_blank" rel="noopener noreferrer" style="color: #34d399; text-decoration: none; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(52,211,153,0.3); background: rgba(52,211,153,0.08);">⚡ Main Bot Pair</a>
         </div>
@@ -1049,7 +1172,7 @@ app.listen(PORT, async () => {
     const cfg = configStore.getConfig();
     console.log(`\n======================================================`);
     console.log(`⚡ ${cfg.botName} v2.0 RUNNING ON PORT ${PORT}`);
-    console.log(`🛠️ Loaded Commands: ${registry.getAllCommands().length} across 6 categories`);
+    console.log(`🛠️ Loaded Commands: ${registry.getAllCommands().length} across ${registry.getCategories().length} categories`);
     console.log(`💾 Initial RAM: ${getMemoryUsageMb()} MB / 512 MB`);
     console.log(`======================================================\n`);
 

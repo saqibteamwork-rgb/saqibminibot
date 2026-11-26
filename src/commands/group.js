@@ -620,6 +620,39 @@ const commands = [
                 mentions: [pick.id]
             }, ctx.quoteOpt);
         }
+    },
+    {
+        name: 'vcf',
+        aliases: ['contacts', 'exportcontacts', 'groupvcf'],
+        category: 'group',
+        desc: 'Group ke tamam members ka .vcf Contacts card export karein',
+        handler: async (ctx) => {
+            if (!ctx.isGroup) return ctx.reply('❌ Yeh command sirf *Groups* mein chalti hai!');
+            ctx.react('📇');
+            const meta = ctx.groupMeta || await ctx.sock.groupMetadata(ctx.from);
+            const participants = meta?.participants || [];
+            let vcfData = '';
+            let exported = 0;
+
+            for (let i = 0; i < participants.length; i++) {
+                const p = participants[i];
+                const digits = await resolveJidToDigits(ctx.sock, p.id, p.phoneNumber || p.pn || null, meta);
+                const clean = String(digits || '').replace(/[^0-9]/g, '');
+                if (clean.length >= 7 && clean.length <= 15) {
+                    exported++;
+                    vcfData += `BEGIN:VCARD\nVERSION:3.0\nFN:${meta.subject || 'Group'} Member ${exported}\nTEL;type=CELL;type=VOICE;waid=${clean}:+${clean}\nEND:VCARD\n`;
+                }
+            }
+
+            if (!exported) return ctx.reply('❌ Group members ke valid phone numbers nahi mil sake.');
+            const cleanName = (meta.subject || 'Group_Contacts').replace(/[^a-zA-Z0-9_-]/g, '_');
+            await ctx.sock.sendMessage(ctx.from, {
+                document: Buffer.from(vcfData, 'utf8'),
+                mimetype: 'text/vcard',
+                fileName: `${cleanName}_Contacts.vcf`,
+                caption: `📇 *GROUP VCF EXPORTER*\n• *Group:* ${meta.subject}\n• *Contacts Exported:* ${exported}/${participants.length}`
+            }, ctx.quoteOpt);
+        }
     }
 ];
 

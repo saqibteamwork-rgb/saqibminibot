@@ -5,7 +5,7 @@
  */
 
 const crypto = require('crypto');
-const { httpClient, withTtlCache, isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid } = require('../mediaHelper');
+const { httpClient, withTtlCache, isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid, extractMedia, formatBytes } = require('../mediaHelper');
 
 let _QRCode = null;
 const getQR = () => (_QRCode || (_QRCode = require('qrcode')));
@@ -517,6 +517,205 @@ const commands = [
             const url = await ctx.sock.profilePictureUrl(target, 'image').catch(() => null);
             if (!url) return ctx.reply('🔒 User ki DP private hai ya available nahi.');
             await ctx.sock.sendMessage(ctx.from, { image: { url }, caption: `🖼️ *Profile Pic:* ${target.split('@')[0]}` }, ctx.quoteOpt);
+        }
+    },
+    {
+        name: 'tourl',
+        aliases: ['url', 'upload', 'imgurl', 'fileurl', 'mediaurl', 'tolink'],
+        category: 'tools',
+        desc: 'Kisi bhi photo, video, audio ya sticker ko public Catbox URL mein badlein',
+        handler: async (ctx) => {
+            const media = await extractMedia(ctx.quotedMsg || ctx.content);
+            if (!media?.buffer?.length) {
+                return ctx.reply(`Usage: Kisi *Image, Video, Audio ya Sticker* par reply karke *${ctx.prefix}tourl* likhein!`);
+            }
+            ctx.react('⏳');
+            const extMap = {
+                image: String(media.mimetype || '').includes('png') ? 'png' : 'jpg',
+                video: 'mp4',
+                audio: String(media.mimetype || '').includes('ogg') ? 'ogg' : 'mp3',
+                sticker: 'webp'
+            };
+            const ext = extMap[media.mediaType] || ((media.fileName && media.fileName.includes('.')) ? media.fileName.split('.').pop() : 'bin');
+            const form = new FormData();
+            form.append('reqtype', 'fileupload');
+            form.append('fileToUpload', new Blob([media.buffer], { type: media.mimetype || 'application/octet-stream' }), `sigma_${Date.now()}.${ext}`);
+
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 30000);
+            try {
+                const res = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: form, signal: ctrl.signal });
+                const outUrl = (await res.text()).trim();
+                if (!/^https?:\/\//i.test(outUrl)) throw new Error(outUrl || 'Upload failed');
+                await ctx.reply(
+                    `🔗 *MEDIA UPLOADED TO CLOUD!*\n` +
+                    `• *Size:* ${formatBytes(media.buffer.length)}\n` +
+                    `• *URL:* ${outUrl}`
+                );
+                ctx.react('✅');
+            } catch (e) {
+                await ctx.reply(`❌ *Upload Error:* ${e.message}`);
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+    },
+    {
+        name: 'wame',
+        aliases: ['walink', 'wame2', 'wa', 'chatlink'],
+        category: 'tools',
+        desc: 'Kisi bhi number ya mentioned user ka direct wa.me chat link banayein',
+        handler: async (ctx) => {
+            let clean = ctx.fullArgs.replace(/[^0-9]/g, '');
+            if (!clean) {
+                const target = extractTargetJid(ctx.msg, ctx.args, ctx.content, ctx.groupMeta);
+                if (target) clean = target.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+                else clean = ctx.senderDigits;
+            }
+            if (!clean || clean.length < 7) {
+                return ctx.reply(`Usage: *${ctx.prefix}wame 923438673242* ya kisi user ke message par reply karein.`);
+            }
+            await ctx.reply(`📱 *DIRECT WHATSAPP LINK:*\n• *Number:* +${clean}\n• *Link:* https://wa.me/${clean}`);
+        }
+    },
+    {
+        name: 'hadith',
+        aliases: ['hadees', 'bukhari'],
+        category: 'tools',
+        desc: 'Sahih al-Bukhari se random Hadith share karein',
+        handler: async (ctx) => {
+            const fallback = [
+                'The best among you are those who have the best manners and character. (Sahih al-Bukhari)',
+                'None of you truly believes until he wishes for his brother what he wishes for himself. (Sahih al-Bukhari)',
+                'Whoever believes in Allah and the Last Day should speak good or remain silent. (Sahih al-Bukhari)',
+                'The strong person is not the one who can wrestle, but the one who controls himself in anger. (Sahih al-Bukhari)'
+            ];
+            try {
+                const list = await withTtlCache('hadith:bukhari100', 3600000, async () => {
+                    const r = await httpClient.get('https://api.hadith.gading.dev/books/bukhari?range=1-100', { timeout: 8000 });
+                    return r.data?.data?.hadiths || [];
+                });
+                if (Array.isArray(list) && list.length) {
+                    const pick = list[Math.floor(Math.random() * list.length)];
+                    const body = pick.id || pick.arab || pick.text || fallback[0];
+                    return ctx.reply(`📿 *HADITH — Sahih al-Bukhari #${pick.number}*\n\n${String(body).slice(0, 1500)}`);
+                }
+            } catch (_) {}
+            await ctx.reply(`📿 *HADITH*\n\n${fallback[Math.floor(Math.random() * fallback.length)]}`);
+        }
+    },
+    {
+        name: 'dua',
+        aliases: ['duas', 'supplication'],
+        category: 'tools',
+        desc: 'Masnoon Dua Arabic & Urdu/English tarjuma ke sath',
+        handler: async (ctx) => {
+            const duas = [
+                { title: 'Dua for Ease', ar: 'اللَّهُمَّ لاَ سَهْلَ إِلاَّ مَا جَعَلْتَهُ سَهْلاً', en: 'O Allah, nothing is easy except what You make easy.' },
+                { title: 'Dua for Knowledge', ar: 'رَّبِّ زِدْنِي عِلْمًا', en: 'My Lord, increase me in knowledge.' },
+                { title: 'Dua for Forgiveness', ar: 'رَبِّ اغْفِرْ لِي وَتُبْ عَلَيَّ', en: 'My Lord, forgive me and accept my repentance.' },
+                { title: 'Dua for Protection', ar: 'أَعُوذُ بِكَلِمَاتِ اللَّهِ التَّامَّاتِ مِنْ شَرِّ مَا خَلَقَ', en: 'I seek refuge in Allah\'s perfect words from all harm.' }
+            ];
+            const d = duas[Math.floor(Math.random() * duas.length)];
+            await ctx.reply(`🤲 *${d.title}*\n\n${d.ar}\n\n_${d.en}_`);
+        }
+    },
+    {
+        name: 'azkar',
+        aliases: ['adhkar', 'zikr'],
+        category: 'tools',
+        desc: 'Morning / Evening aur Hifazat ke Masnoon Azkar',
+        handler: async (ctx) => {
+            const list = [
+                { t: 'Morning Azkar', ar: 'أَصْبَحْنَا وَأَصْبَحَ الْمُلْكُ لِلَّهِ، وَالْحَمْدُ لِلَّهِ', en: 'We have reached the morning and all sovereignty belongs to Allah.' },
+                { t: 'Protection Azkar', ar: 'بِسْمِ اللَّهِ الَّذِي لَا يَضُرُّ مَعَ اسْمِهِ شَيْءٌ فِي الْأَرْضِ وَلَا فِي السَّمَاءِ', en: 'In the name of Allah, with whose Name nothing in earth or heaven causes harm.' },
+                { t: 'Evening / Reliance', ar: 'حَسْبِيَ اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ عَلَيْهِ تَوَكَّلْتُ', en: 'Sufficient for me is Allah; there is no deity except Him; in Him I trust.' }
+            ];
+            const z = list[Math.floor(Math.random() * list.length)];
+            await ctx.reply(`🌙 *${z.t}*\n\n${z.ar}\n\n_${z.en}_`);
+        }
+    },
+    {
+        name: 'tasbeeh',
+        aliases: ['tasbih', 'dhikr'],
+        category: 'tools',
+        desc: 'Digital Tasbeeh Counter (.tasbeeh / .tasbeeh reset)',
+        handler: async (ctx) => {
+            if (!global.__sigmaTasbeehMap) global.__sigmaTasbeehMap = new Map();
+            const map = global.__sigmaTasbeehMap;
+            const key = ctx.senderDigits || ctx.from;
+            if ((ctx.args[0] || '').toLowerCase() === 'reset') {
+                map.set(key, 0);
+                return ctx.reply('📿 *Tasbeeh Counter Reset!* Count: *0*');
+            }
+            if (map.size >= 500) map.delete(map.keys().next().value);
+            const next = (map.get(key) || 0) + 1;
+            map.set(key, next);
+            const phrase = ['SubhanAllah', 'Alhamdulillah', 'Allahu Akbar'][Math.floor((next - 1) / 33) % 3];
+            await ctx.reply(`📿 *DIGITAL TASBEEH*\n• *Dhikr:* ${phrase}\n• *Count:* ${next}\n_(Reset ke liye *${ctx.prefix}tasbeeh reset*)_`);
+        }
+    },
+    {
+        name: 'lyrics',
+        aliases: ['lyric', 'songlyrics'],
+        category: 'tools',
+        desc: 'Kisi bhi song ke lyrics search karein (.lyrics Shape of You)',
+        handler: async (ctx) => {
+            if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}lyrics <song name>*`);
+            const q = ctx.fullArgs;
+            const hit = await withTtlCache(`lyrics:${q.toLowerCase()}`, 600000, async () => {
+                const res = await httpClient.get(`https://lrclib.net/api/search?q=${encodeURIComponent(q)}`, { timeout: 10000 });
+                const list = Array.isArray(res.data) ? res.data : [];
+                return list.find(x => x?.plainLyrics) || null;
+            });
+            if (!hit) return ctx.reply('❌ Is song ke lyrics nahi mile.');
+            await ctx.reply(`🎵 *${hit.trackName || q}* — _${hit.artistName || 'Unknown'}_\n\n${String(hit.plainLyrics).slice(0, 3200)}`);
+        }
+    },
+    {
+        name: 'binary',
+        aliases: ['bin2text', 'text2bin'],
+        category: 'tools',
+        desc: 'Text ko Binary ya Binary ko Text mein convert karein',
+        handler: async (ctx) => {
+            const sub = (ctx.args[0] || '').toLowerCase();
+            if (sub === 'dec' || sub === 'decode') {
+                const bin = ctx.args.slice(1).join(' ').trim();
+                if (!bin) return ctx.reply(`Usage: *${ctx.prefix}binary dec 01001000 01101001*`);
+                const text = bin.split(/\s+/).map(b => (/^[01]+$/.test(b) ? String.fromCharCode(parseInt(b, 2)) : '')).join('');
+                return ctx.reply(`🔓 *Decoded Text:*\n${text}`);
+            }
+            const raw = sub === 'enc' || sub === 'encode' ? ctx.args.slice(1).join(' ') : ctx.fullArgs;
+            if (!raw) return ctx.reply(`Usage: *${ctx.prefix}binary Hello* | *${ctx.prefix}binary dec 01001000*`);
+            const bin = Array.from(raw).map(ch => ch.charCodeAt(0).toString(2).padStart(8, '0')).join(' ');
+            await ctx.reply(`💻 *Binary Output:*\n\`${bin.slice(0, 1500)}\``);
+        }
+    },
+    {
+        name: 'fetch',
+        aliases: ['geturl', 'curlsite'],
+        category: 'tools',
+        desc: 'Kisi public URL ya API se raw JSON/Text fetch karein',
+        handler: async (ctx) => {
+            const safeUrl = isSafePublicHttpUrl(ctx.args[0]);
+            if (!safeUrl) return ctx.reply(`Usage: *${ctx.prefix}fetch https://api.github.com* (public URL only)`);
+            const res = await httpClient.get(safeUrl, { timeout: 10000, maxContentLength: 2 * 1024 * 1024, responseType: 'text', transformResponse: [(d) => d] });
+            const out = typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2);
+            await ctx.reply(`🌐 *HTTP ${res.status} Response:*\n\`\`\`${String(out).slice(0, 3000)}\`\`\``);
+        }
+    },
+    {
+        name: 'meme',
+        aliases: ['memes', 'randommeme'],
+        category: 'tools',
+        desc: 'Fresh trending Meme image fetch karein',
+        handler: async (ctx) => {
+            const r = await httpClient.get('https://meme-api.com/gimme', { timeout: 9000 });
+            if (!r.data?.url || r.data.nsfw) return ctx.reply('❌ Fresh meme fetch nahi ho saka, dobara try karein.');
+            await ctx.sock.sendMessage(ctx.from, {
+                image: { url: r.data.url },
+                caption: `😂 *${r.data.title || 'Meme'}*\n📌 _r/${r.data.subreddit || 'memes'}_`
+            }, ctx.quoteOpt);
         }
     }
 ];

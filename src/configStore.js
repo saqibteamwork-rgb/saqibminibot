@@ -60,6 +60,7 @@ function getDefaultConfig() {
         autorecord: false,
         antidelete: false,
         autovv: false,
+        anticall: false,
         autoFollowChannels: [],
         groups: {}
     };
@@ -99,6 +100,7 @@ function mergeWithDefaults(raw) {
         autorecord: Boolean(raw?.autorecord),
         antidelete: Boolean(raw?.antidelete),
         autovv: Boolean(raw?.autovv),
+        anticall: Boolean(raw?.anticall),
         autoFollowChannels: Array.isArray(raw?.autoFollowChannels) ? raw.autoFollowChannels : [],
         groups: (raw?.groups && typeof raw.groups === 'object') ? raw.groups : {}
     };

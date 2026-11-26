@@ -31,6 +31,7 @@ const CATEGORY_SECTIONS = [
     { key: 'group', title: 'GROUP', aliases: ['group', 'gc', 'grp', 'groupmenu', 'gcmenu'] },
     { key: 'channel', title: 'CHANNEL', aliases: ['channel', 'ch', 'chnl', 'channelmenu', 'chmenu'] },
     { key: 'downloader', title: 'DOWNLOAD', aliases: ['dl', 'download', 'downloader', 'down', 'dlmenu'] },
+    { key: 'sticker', title: 'STICKERS & SFX', aliases: ['sticker', 'stickers', 'sfx', 'lottie', 'stickermenu'] },
     { key: 'tools', title: 'TOOLS & ISLAMIC', aliases: ['tool', 'tools', 'utility', 'util', 'islamic', 'toolsmenu'] }
 ];
 
@@ -218,6 +219,7 @@ const commands = [
     makeCategoryMenuCommand('groupmenu', ['menugroup', 'gcmenu'], 'group', 'GROUP'),
     makeCategoryMenuCommand('channelmenu', ['menuchannel', 'chmenu'], 'channel', 'CHANNEL'),
     makeCategoryMenuCommand('dlmenu', ['downloadermenu', 'downloadmenu'], 'downloader', 'DOWNLOAD'),
+    makeCategoryMenuCommand('stickermenu', ['menusticker', 'sfxmenu'], 'sticker', 'STICKERS & SFX'),
     makeCategoryMenuCommand('toolsmenu', ['menutools', 'utilitymenu'], 'tools', 'TOOLS & ISLAMIC'),
     {
         name: 'ping',

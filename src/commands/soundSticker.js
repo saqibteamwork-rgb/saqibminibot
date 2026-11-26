@@ -208,7 +208,7 @@ const commands = [
     {
         name: 'ssound',
         aliases: ['stickersound', 'soundsticker', 'stikersound', 'stickeraudio', 'saudio', 'sfxsticker', 'stksound', 'sfx', 'sounds', 'soundstk', 'addsound', 'audiosticker', 'voicesticker'],
-        category: 'tools',
+        category: 'sticker',
         desc: 'Kisi bhi Sticker par Sound Effect ya Voice lagayein (.ssound sigma)',
         handler: async (ctx) => {
             const p = ctx.prefix || '.';

@@ -11,7 +11,8 @@ const modules = [
     ...require('./channel'),
     ...require('./downloader'),
     ...require('./tools'),
-    ...require('./soundSticker')
+    ...require('./soundSticker'),
+    ...require('./stickersAndAi')
 ];
 
 const commandMap = new Map();
@@ -50,8 +51,13 @@ function getByCategory(cat) {
     return byCategory.get(cat) || [];
 }
 
+function getCategories() {
+    return Array.from(byCategory.keys());
+}
+
 module.exports = {
     findCommand,
     getAllCommands,
-    getByCategory
+    getByCategory,
+    getCategories
 };

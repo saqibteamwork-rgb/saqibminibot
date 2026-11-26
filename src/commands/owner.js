@@ -18,7 +18,10 @@ const {
     toSansBold,
     getPrimaryOwnerDigits,
     formatReadablePhone,
-    sendMediaOrTextCard
+    sendMediaOrTextCard,
+    setCustomMenuImageBuffer,
+    resetCustomMenuImageBuffer,
+    hasCustomMenuImage
 } = require('../mediaHelper');
 
 async function denyNonOwner(ctx) {
@@ -492,6 +495,55 @@ const commands = [
             await ctx.reply(`🔄 *Restarting ${configStore.getConfig().botName}...* (Uptime tha: ${formatUptime(ctx.runtime.getUptimeSec())})`);
             await ctx.runtime.forceCloudBackup().catch(() => {});
             setTimeout(() => process.exit(0), 1000);
+        }
+    },
+    {
+        name: 'anticall',
+        aliases: ['acall', 'nocall', 'blockcall'],
+        category: 'owner',
+        desc: 'Incoming WhatsApp voice/video calls auto-reject karein (on/off)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyNonOwner(ctx);
+            const sub = (ctx.args[0] || '').toLowerCase();
+            const cfg = configStore.getConfig();
+            if (!['on', 'off'].includes(sub)) {
+                return ctx.reply(`📵 *Anti-Call Status:* ${cfg.anticall ? 'ON' : 'OFF'}\nUsage: *${ctx.prefix}anticall on* | *${ctx.prefix}anticall off*`);
+            }
+            configStore.updateConfig({ anticall: sub === 'on' });
+            await ctx.reply(`✅ *Anti-Call* ab *${sub.toUpperCase()}* hai!${sub === 'on' ? ' Incoming calls auto-reject hongi.' : ''}`);
+        }
+    },
+    {
+        name: 'setmenupic',
+        aliases: ['setmenuimg', 'setmenudp', 'menupic'],
+        category: 'owner',
+        desc: 'Reply ki gayi image ko Menu & Profile Card photo lagayein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyNonOwner(ctx);
+            const media = await extractMedia(ctx.quotedMsg || ctx.content);
+            if (!media || media.mediaType !== 'image') {
+                return ctx.reply(`❌ Kisi image par reply karke *${ctx.prefix}setmenupic* likhein.`);
+            }
+            setCustomMenuImageBuffer(media.buffer);
+            await ctx.reply(`✅ *Menu & Dashboard Card Picture Update Ho Gayi!*\n_${ctx.prefix}menu type karke check karein, ya ${ctx.prefix}resetmenu se default photo wapas lagayein._`);
+        }
+    },
+    {
+        name: 'resetmenu',
+        aliases: ['resetmenupic', 'defaultmenu'],
+        category: 'owner',
+        desc: 'Menu Card photo ko wapas SIGMA default photo par reset karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyNonOwner(ctx);
+            const hadCustom = hasCustomMenuImage();
+            const ok = resetCustomMenuImageBuffer();
+            await ctx.reply(ok
+                ? `🔄 *Menu Card Default Photo Par Reset Ho Gayi!*${hadCustom ? ' (Custom image removed)' : ''}`
+                : 'ℹ️ Default SIGMA Menu photo active hai.'
+            );
         }
     }
 ];

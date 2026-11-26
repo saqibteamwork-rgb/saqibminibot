@@ -869,6 +869,180 @@ const commands = [
             configStore.updateConfig({ channelCardEnabled: sub === 'on' });
             await ctx.reply(`✅ View Channel Forward Card ab *${sub.toUpperCase()}* hai.`);
         }
+    },
+    {
+        name: 'chreactall',
+        aliases: ['reactallch', 'allreact'],
+        category: 'channel',
+        desc: 'Channel ke recent 5 posts par all servers se react karein (.chreactall <link> 🔥)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '🔥');
+            const lookup = parsed.code ? `https://whatsapp.com/channel/${parsed.code}` : (parsed.jid || ctx.args[0] || '');
+            const info = await resolveChannelTarget(ctx.sock, lookup, ctx.msg).catch(() => null);
+            const jid = info?.jid || parsed.jid;
+            const code = info?.inviteCode || parsed.code;
+            const chName = info?.name || parsed.name;
+            if (!jid) return ctx.reply(`Usage: *${ctx.prefix}chreactall <channel-link | @newsletter JID> [emoji]*`);
+
+            const emojiTokens = String(parsed.extraText || '🔥').split(/[\s,]+/).filter(Boolean);
+            const emojiPool = emojiTokens.length ? emojiTokens : ['🔥'];
+            const primaryEmoji = emojiPool[0];
+            ctx.react('⏳');
+
+            let posts = [];
+            try {
+                if (typeof ctx.sock.newsletterFetchMessages === 'function') {
+                    const fetched = await withTimeout(ctx.sock.newsletterFetchMessages('jid', jid, 5), 8000, 'Fetch posts');
+                    if (Array.isArray(fetched)) {
+                        posts = fetched.map(m => String(m?.server_id || m?.key?.server_id || m?.attrs?.server_id || '')).filter(Boolean);
+                    }
+                }
+            } catch (_) {}
+
+            if (!posts.length && (parsed.postId || info?.postId)) {
+                posts = [String(parsed.postId || info?.postId)];
+            }
+            if (!posts.length) {
+                return ctx.reply(`❌ Channel ke recent posts fetch nahi ho sake. Post link ke sath *${ctx.prefix}chreact* use karein.`);
+            }
+
+            let okCount = 0;
+            for (const sid of posts.slice(0, 5)) {
+                broadcastToMiniCluster('chreact', {
+                    jid,
+                    code: code || null,
+                    serverId: sid,
+                    emojiPool,
+                    customEmojis: emojiPool,
+                    hasCustomEmoji: true,
+                    emoji: primaryEmoji,
+                    channelName: chName
+                }).catch(() => {});
+                await withTimeout(ctx.sock.newsletterReactMessage(jid, sid, primaryEmoji), 4500, 'React all').catch(() => {});
+                okCount++;
+                await sleep(900);
+            }
+            ctx.react('✅');
+            await ctx.reply(`✅ *${okCount} Channel Posts* par ${emojiPool.join(' ')} reaction sent across all ${CLUSTER_URLS.length} servers!`);
+        }
+    },
+    {
+        name: 'chunreact',
+        aliases: ['unreactch', 'rmreact'],
+        category: 'channel',
+        desc: 'Channel post se apna emoji reaction hatayein (.chunreact <post-link>)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '');
+            const lookup = parsed.code
+                ? `https://whatsapp.com/channel/${parsed.code}${parsed.postId ? '/' + parsed.postId : ''}`
+                : (parsed.jid || ctx.args[0] || '');
+            const info = await resolveChannelTarget(ctx.sock, lookup, ctx.msg).catch(() => null);
+            const jid = info?.jid || parsed.jid;
+            const code = info?.inviteCode || parsed.code;
+            const serverId = parsed.postId || info?.postId;
+            if ((!jid && !code) || !serverId) {
+                return ctx.reply(`Usage: *${ctx.prefix}chunreact <channel-post-link>* ya channel post par reply karein.`);
+            }
+            ctx.react('⏳');
+            broadcastToMiniCluster('chreact', {
+                jid,
+                code: code || null,
+                serverId: String(serverId),
+                emojiPool: [''],
+                customEmojis: [''],
+                hasCustomEmoji: true,
+                emoji: ''
+            }).catch(() => {});
+            if (jid && /^\d+@newsletter$/.test(jid)) {
+                await withTimeout(ctx.sock.newsletterReactMessage(jid, String(serverId), ''), 5000, 'Channel unreact').catch(() => {});
+            }
+            ctx.react('✅');
+            await ctx.reply(`✅ *Reaction Removed!* Channel Post #${serverId}`);
+        }
+    },
+    {
+        name: 'pollvote',
+        aliases: ['votepoll'],
+        category: 'channel',
+        desc: 'Quoted ya linked Channel/Group Poll par vote karein (.pollvote 1)',
+        ownerOnly: true,
+        handler: async (ctx) => handleMiniChvote(ctx, null)
+    },
+    {
+        name: 'pollrand',
+        aliases: ['randomvote', 'randvote'],
+        category: 'channel',
+        desc: 'Quoted Channel Poll par random option par vote karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const qPoll = ctx.quotedMsg ? extractPollOptsFromObj(ctx.quotedMsg) : null;
+            const totalOpts = qPoll?.options?.length || 2;
+            const pickIdx = Math.floor(Math.random() * totalOpts) + 1;
+            return handleMiniChvote(ctx, String(pickIdx));
+        }
+    },
+    {
+        name: 'pollunvote',
+        aliases: ['unvote', 'rmvote'],
+        category: 'channel',
+        desc: 'Quoted Channel Poll se apna vote hatayein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const unwrapped = unwrapMessage(ctx.msg?.message);
+            const mCtx = getContextInfo(unwrapped);
+            const fnmi = mCtx?.forwardedNewsletterMessageInfo || getContextInfo(unwrapMessage(ctx.quotedMsg))?.forwardedNewsletterMessageInfo;
+            const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '');
+            const jid = fnmi?.newsletterJid || parsed.jid;
+            const serverId = fnmi?.serverMessageId || fnmi?.newsletterServerMessageId || parsed.postId;
+
+            if (!jid || !serverId || !/^\d+@newsletter$/.test(jid)) {
+                return ctx.reply(`ℹ️ Kisi forwarded *Channel Poll* par reply karke *${ctx.prefix}pollunvote* likhein.`);
+            }
+            if (typeof ctx.sock.query === 'function') {
+                const msgId = typeof ctx.sock.generateMessageTag === 'function' ? ctx.sock.generateMessageTag() : `${Date.now()}`;
+                await withTimeout(ctx.sock.query({
+                    tag: 'message',
+                    attrs: { to: jid, id: msgId, type: 'poll', server_id: String(serverId) },
+                    content: [
+                        { tag: 'meta', attrs: { polltype: 'vote' } },
+                        { tag: 'votes', attrs: {}, content: [] }
+                    ]
+                }), 5000, 'Channel poll unvote').catch(() => {});
+            }
+            await ctx.reply(`✅ *Channel Poll Unvoted!* (Post #${serverId})`);
+        }
+    },
+    {
+        name: 'pollvinfo',
+        aliases: ['pollinfo', 'pinfo'],
+        category: 'channel',
+        desc: 'Quoted Channel ya Chat Poll ki options aur details dekhein',
+        handler: async (ctx) => {
+            const qPoll = ctx.quotedMsg ? extractPollOptsFromObj(ctx.quotedMsg) : null;
+            if (!qPoll) {
+                return ctx.reply(`❌ Kisi *Poll* par reply karke *${ctx.prefix}pollvinfo* likhein!`);
+            }
+            const unwrapped = unwrapMessage(ctx.msg?.message);
+            const mCtx = getContextInfo(unwrapped);
+            const fnmi = mCtx?.forwardedNewsletterMessageInfo || getContextInfo(unwrapMessage(ctx.quotedMsg))?.forwardedNewsletterMessageInfo;
+            const optsText = qPoll.options.map((opt, idx) => `┃  ${idx + 1}. *${opt}*`).join('\n');
+            await ctx.reply(
+                `╭━━━〔 📊 *POLL INFORMATION* 〕━━━┈⊷\n` +
+                `┃ ❓ *Question:* ${qPoll.name}\n` +
+                `┃ 📺 *Type:* ${fnmi?.newsletterJid ? '📢 Channel Poll' : '💬 Chat Poll'}\n` +
+                `┃ 🔢 *Options:* ${qPoll.options.length}\n` +
+                `${optsText}\n` +
+                (fnmi?.newsletterJid ? `┃ 🆔 *Channel:* \`${fnmi.newsletterJid}\`\n` : '') +
+                (fnmi?.serverMessageId ? `┃ 📌 *Post:* #${fnmi.serverMessageId}\n` : '') +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+            );
+        }
     }
 ];
 

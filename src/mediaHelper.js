@@ -421,27 +421,62 @@ function toSansBold(str) {
     });
 }
 
-const MENU_IMAGE_PATH = path.join(__dirname, '..', 'assets', 'sigma_menu.png');
+const MENU_IMAGE_PATH = path.join(__dirname, '..', 'assets', 'sigma_menu.jpg');
+const CUSTOM_MENU_IMAGE_PATH = path.join(__dirname, '..', 'data', 'custom_menu.jpg');
 let PRELOADED_MENU_IMAGE = null;
-try {
-    if (fs.existsSync(MENU_IMAGE_PATH)) {
-        PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
+
+function loadMenuImageFromDisk() {
+    for (const candidate of [CUSTOM_MENU_IMAGE_PATH, MENU_IMAGE_PATH]) {
+        try {
+            if (fs.existsSync(candidate)) {
+                return fs.readFileSync(candidate);
+            }
+        } catch (_) {}
     }
-} catch (_) {}
+    return null;
+}
+
+PRELOADED_MENU_IMAGE = loadMenuImageFromDisk();
 
 function getMenuImageBuffer() {
     if (PRELOADED_MENU_IMAGE) return PRELOADED_MENU_IMAGE;
-    try {
-        if (fs.existsSync(MENU_IMAGE_PATH)) {
-            PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
-        }
-    } catch (_) {}
+    PRELOADED_MENU_IMAGE = loadMenuImageFromDisk();
     return PRELOADED_MENU_IMAGE;
 }
 
+function hasCustomMenuImage() {
+    try {
+        return fs.existsSync(CUSTOM_MENU_IMAGE_PATH);
+    } catch (_) {
+        return false;
+    }
+}
+
 const MENU_MEDIA_UPLOAD_TTL = 20 * 60 * 1000;
-const uploadedMenuCache = new WeakMap();
-const inFlightMenuUpload = new WeakMap();
+let uploadedMenuCache = new WeakMap();
+let inFlightMenuUpload = new WeakMap();
+
+function setCustomMenuImageBuffer(buf) {
+    if (!Buffer.isBuffer(buf) || buf.length < 100) {
+        throw new Error('Valid image buffer required.');
+    }
+    fs.mkdirSync(path.dirname(CUSTOM_MENU_IMAGE_PATH), { recursive: true });
+    fs.writeFileSync(CUSTOM_MENU_IMAGE_PATH, buf);
+    PRELOADED_MENU_IMAGE = buf;
+    uploadedMenuCache = new WeakMap();
+    inFlightMenuUpload = new WeakMap();
+    return true;
+}
+
+function resetCustomMenuImageBuffer() {
+    try {
+        if (fs.existsSync(CUSTOM_MENU_IMAGE_PATH)) fs.unlinkSync(CUSTOM_MENU_IMAGE_PATH);
+    } catch (_) {}
+    PRELOADED_MENU_IMAGE = loadMenuImageFromDisk();
+    uploadedMenuCache = new WeakMap();
+    inFlightMenuUpload = new WeakMap();
+    return Boolean(PRELOADED_MENU_IMAGE);
+}
 
 async function getCachedUploadedMenuMedia(sock, imgBuf) {
     if (!sock || !imgBuf || typeof sock.waUploadToServer !== 'function' || typeof prepareWAMessageMedia !== 'function') {
@@ -592,6 +627,9 @@ module.exports = {
     formatUptime,
     toSansBold,
     getMenuImageBuffer,
+    setCustomMenuImageBuffer,
+    resetCustomMenuImageBuffer,
+    hasCustomMenuImage,
     warmMenuMedia,
     getPrimaryOwnerDigits,
     formatReadablePhone,

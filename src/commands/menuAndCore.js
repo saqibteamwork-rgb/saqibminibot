@@ -13,8 +13,168 @@ const {
     toSansBold,
     getPrimaryOwnerDigits,
     formatReadablePhone,
-    sendMediaOrTextCard
+    sendMediaOrTextCard,
+    extractTargetJid,
+    resolveJidToDigits,
+    httpClient
 } = require('../mediaHelper');
+
+const MAIN_BOT_NODES = [
+    'https://web-production-08da5300.up.railway.app',
+    'https://saqib-bot-v1-d3ecc6f0292e.herokuapp.com',
+    'https://saqib-bot-s2-1cceb03e9698.herokuapp.com',
+    'https://saqibbot3-bb2b46aa1cb4.herokuapp.com',
+    'https://saqibot4-1469f73b3d77.herokuapp.com',
+    'https://saqibbot5-5ffa090fe31f.herokuapp.com',
+    'https://saqibot6-061b6d17645d.herokuapp.com'
+];
+const pairReqCooldown = new Map();
+
+function normalizePairDigits(raw) {
+    if (!raw) return '';
+    let n = String(raw).replace(/[^0-9]/g, '');
+    if (n.startsWith('00')) n = n.slice(2);
+    else if (n.startsWith('0')) n = '92' + n.slice(1);
+    else if (n.startsWith('3') && n.length === 10) n = '92' + n;
+    return n;
+}
+
+async function resolvePairRequestTarget(ctx) {
+    let explicitNum = '';
+    let customCode = '';
+    let hasForce = false;
+
+    for (const arg of (ctx.args || [])) {
+        const low = String(arg || '').toLowerCase();
+        if (low === 'force' || low === '-f') {
+            hasForce = true;
+            continue;
+        }
+        const digits = normalizePairDigits(arg);
+        if (!explicitNum && digits.length >= 10 && digits.length <= 15) {
+            explicitNum = digits;
+            continue;
+        }
+        const alnum = String(arg || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (!customCode && alnum.length === 8 && !/^\d+$/.test(alnum)) {
+            customCode = alnum;
+        }
+    }
+
+    if (explicitNum) return { number: explicitNum, customCode, hasForce };
+
+    const targetJid = extractTargetJid(ctx.msg, ctx.args, ctx.content, ctx.groupMeta);
+    if (targetJid) {
+        const resolved = normalizePairDigits(await resolveJidToDigits(ctx.sock, targetJid, null, ctx.groupMeta));
+        if (resolved.length >= 10 && resolved.length <= 15) {
+            return { number: resolved, customCode, hasForce };
+        }
+    }
+
+    const senderClean = normalizePairDigits(ctx.senderDigits);
+    if (senderClean.length >= 10 && senderClean.length <= 15) {
+        return { number: senderClean, customCode, hasForce };
+    }
+    return { number: '', customCode, hasForce };
+}
+
+function checkPairCooldown(key) {
+    const now = Date.now();
+    const last = pairReqCooldown.get(key) || 0;
+    if (now - last < 12000) return Math.ceil((12000 - (now - last)) / 1000);
+    if (pairReqCooldown.size >= 300) pairReqCooldown.delete(pairReqCooldown.keys().next().value);
+    pairReqCooldown.set(key, now);
+    return 0;
+}
+
+async function pickHealthyMainBotNode() {
+    const probes = MAIN_BOT_NODES.map(async (url) => {
+        try {
+            const res = await httpClient.get(`${url}/health`, { timeout: 3500 });
+            const d = res.data || {};
+            const active = typeof d.activeSessions === 'number' ? d.activeSessions : (d.pairedSessions || 0);
+            const max = typeof d.maxSessions === 'number' ? d.maxSessions : 25;
+            return { url, active, max, mem: d.memoryUsageMb || 0 };
+        } catch (_) {
+            return null;
+        }
+    });
+    const results = (await Promise.all(probes)).filter(Boolean);
+    results.sort((a, b) => (a.active - b.active) || (a.mem - b.mem));
+    return (results.find((n) => n.active < n.max) || results[0])?.url || MAIN_BOT_NODES[0];
+}
+
+async function requestMainBotPair(number, customCode = '') {
+    const cfg = configStore.getConfig();
+    const primaryBase = String(cfg.mainPairUrl || 'https://mrsaqib.me/pair').replace(/\/pair\/?$/i, '').replace(/\/+$/, '');
+    const suffix = customCode ? `&custom=${encodeURIComponent(customCode)}` : '';
+    const candidates = [`${primaryBase}/api/pair?number=${encodeURIComponent(number)}${suffix}`];
+
+    let lastData = null;
+    for (const url of candidates) {
+        try {
+            const res = await httpClient.get(url, { timeout: 24000, validateStatus: () => true });
+            if (res.data && typeof res.data === 'object') {
+                lastData = res.data;
+                if (res.data.code || res.data.pairingCode || res.data.status === 'already_connected' || res.data.status === 'connection_in_progress' || res.status === 400) {
+                    return { httpStatus: res.status, data: res.data, source: url };
+                }
+            }
+        } catch (_) {}
+    }
+
+    const fallbackNode = await pickHealthyMainBotNode();
+    const nodeUrl = `${fallbackNode}/api/pair?number=${encodeURIComponent(number)}${suffix}`;
+    const nodeRes = await httpClient.get(nodeUrl, { timeout: 24000, validateStatus: () => true });
+    return { httpStatus: nodeRes.status, data: nodeRes.data || lastData || {}, source: fallbackNode };
+}
+
+async function requestMiniBotPair(number, allowForce = false) {
+    const cfg = configStore.getConfig();
+    const miniBase = String(cfg.miniPairUrl || 'https://sigmamini.vercel.app').replace(/\/+$/, '');
+    const forceQ = allowForce ? '&force=true' : '';
+    const urls = [
+        `${miniBase}/api/pair?number=${encodeURIComponent(number)}${forceQ}`,
+        `https://sigmaminibot-8fdafb0f00ef.herokuapp.com/pair?number=${encodeURIComponent(number)}${forceQ}`
+    ];
+    let lastErr = null;
+    for (const url of urls) {
+        try {
+            const res = await httpClient.get(url, { timeout: 22000, validateStatus: () => true });
+            if (res.data && typeof res.data === 'object') {
+                if (res.status !== 502 && res.status !== 503 && res.status !== 504) {
+                    return { httpStatus: res.status, data: res.data, source: url };
+                }
+                lastErr = new Error(res.data.error || `HTTP ${res.status}`);
+            }
+        } catch (e) {
+            lastErr = e;
+        }
+    }
+    throw lastErr || new Error('Mini Bot server busy hai, kuch second baad try karein.');
+}
+
+async function sendCrossPairSuccess(ctx, number, rawCode, opts) {
+    const cleanCode = String(rawCode).replace(/[^A-Za-z0-9]/g, '');
+    const formattedCode = String(rawCode).includes('-') ? String(rawCode) : (cleanCode.match(/.{1,4}/g)?.join('-') || cleanCode);
+    const msgText =
+        `╭━━━〔 ${opts.title} 〕━━━┈⊷\n` +
+        `┃ 🤖 *Bot:* ${opts.botLabel}\n` +
+        `┃ 📱 *Number:* +${number}\n` +
+        `┃ 🔑 *Code:* \`${formattedCode}\`\n` +
+        `┃\n` +
+        `┃ 📌 *Kaise Link Karein:*\n` +
+        `┃ 1. WhatsApp > Linked Devices kholein\n` +
+        `┃ 2. "Link a Device" -> "Link with phone number"\n` +
+        `┃ 3. Niche diya gaya 8-digit code daalein\n` +
+        `┃ ⏰ Code ~60 seconds ke liye valid hai!\n` +
+        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+        `🌐 *Web Dashboard:* ${opts.webUrl}\n` +
+        `📋 *Neeche wala code 1-tap copy karein* 👇`;
+
+    await ctx.reply(msgText);
+    await ctx.sock.sendMessage(ctx.from, { text: cleanCode }, ctx.quoteOpt);
+}
 
 function toSansItalic(str) {
     return String(str || '').replace(/[A-Za-z]/g, (c) => {
@@ -314,6 +474,107 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}echo Hello World*`);
             await ctx.reply(ctx.fullArgs);
+        }
+    },
+    {
+        name: 'pairmd',
+        aliases: ['mdpair', 'pairmain', 'mainpair', 'getpair', 'pair'],
+        category: 'core',
+        desc: 'Mini Bot ke andar se Main Bot (MR SAQIB MD) ka pairing code lein (.pairmd 923xxxxxxxxx)',
+        handler: async (ctx) => {
+            const { number, customCode } = await resolvePairRequestTarget(ctx);
+            const cfg = configStore.getConfig();
+            const mainWeb = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
+            if (!number) {
+                return ctx.reply(
+                    `🔑 *MAIN BOT PAIRING (.pairmd)*\n\n` +
+                    `Usage: *${ctx.prefix}pairmd 923001234567*\n` +
+                    `_Ya kisi user ko mention/reply karke ${ctx.prefix}pairmd likhein._\n` +
+                    `🌐 Web Link: ${mainWeb}`
+                );
+            }
+            const waitSec = checkPairCooldown(`md:${ctx.senderDigits || ctx.from}`);
+            if (waitSec > 0) {
+                return ctx.reply(`⏳ Thora intezar karein! Dubara request ${waitSec}s baad bhejein.`);
+            }
+            ctx.react('⏳');
+            await ctx.reply(`⏳ *+${number}* ke liye *Main Bot (MR SAQIB MD)* ka pairing code generate ho raha hai...`);
+            try {
+                const { data } = await requestMainBotPair(number, customCode);
+                if (data?.status === 'already_connected' || data?.isConnected) {
+                    ctx.react('✅');
+                    return ctx.reply(`✅ *+${number}* pehle se *Main Bot (MR SAQIB MD)* par connected & online hai!\n🌐 ${mainWeb}`);
+                }
+                if (data?.status === 'connection_in_progress') {
+                    return ctx.reply(`⏳ *+${number}* ki pairing pehle se process ho rahi hai — kuch seconds baad check karein.`);
+                }
+                const code = data?.code || data?.pairingCode;
+                if (!code) {
+                    ctx.react('❌');
+                    return ctx.reply(`❌ Main Bot pairing failed: ${data?.message || data?.error || 'Code generate nahi ho saka.'}\n🌐 Web se try karein: ${mainWeb}`);
+                }
+                ctx.react('🔑');
+                await sendCrossPairSuccess(ctx, number, code, {
+                    title: '🔑 *MAIN BOT PAIRING CODE*',
+                    botLabel: 'MR SAQIB MD (Main Bot)',
+                    webUrl: mainWeb
+                });
+            } catch (e) {
+                ctx.react('❌');
+                await ctx.reply(`❌ *Main Bot Pair Error:* ${e.message}\n🌐 Direct link: ${mainWeb}`);
+            }
+        }
+    },
+    {
+        name: 'pairmini',
+        aliases: ['minipair', 'pairbot'],
+        category: 'core',
+        desc: 'SIGMA Mini Bot ka pairing code hasil karein (.pairmini 923xxxxxxxxx)',
+        handler: async (ctx) => {
+            const { number, hasForce } = await resolvePairRequestTarget(ctx);
+            const cfg = configStore.getConfig();
+            const miniWeb = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
+            if (!number) {
+                return ctx.reply(
+                    `🤖 *MINI BOT PAIRING (.pairmini)*\n\n` +
+                    `Usage: *${ctx.prefix}pairmini 923001234567*\n` +
+                    `🌐 Web Link: ${miniWeb}`
+                );
+            }
+            const waitSec = checkPairCooldown(`mini:${ctx.senderDigits || ctx.from}`);
+            if (waitSec > 0) {
+                return ctx.reply(`⏳ Thora intezar karein! Dubara request ${waitSec}s baad bhejein.`);
+            }
+            ctx.react('⏳');
+            await ctx.reply(`⏳ *+${number}* ke liye *SIGMA MINI BOT* pairing code fetch ho raha hai...`);
+            try {
+                const allowForce = Boolean(ctx.isOwner && hasForce);
+                const { httpStatus, data } = await requestMiniBotPair(number, allowForce);
+                if (httpStatus === 409) {
+                    return ctx.reply(
+                        `⚠️ *SIGMA MINI BOT* par abhi ek number pehle se connected hai.\n` +
+                        (ctx.isOwner ? `💡 Force re-pair ke liye *${ctx.prefix}pairmini ${number} force* likhein.\n` : '') +
+                        `🌐 Web Dashboard: ${miniWeb}`
+                    );
+                }
+                if (httpStatus === 429) {
+                    return ctx.reply(`⏳ Mini Bot par ek pairing pehle se chal rahi hai, 10 second baad dubara try karein.`);
+                }
+                const code = data?.pairingCode || data?.code;
+                if (!data?.success || !code) {
+                    ctx.react('❌');
+                    return ctx.reply(`❌ Mini Bot pairing failed: ${data?.error || 'Code receive nahi hua.'}\n🌐 ${miniWeb}`);
+                }
+                ctx.react('🔑');
+                await sendCrossPairSuccess(ctx, number, code, {
+                    title: '🤖 *SIGMA MINI PAIRING CODE*',
+                    botLabel: 'SIGMA MD (Mini Bot)',
+                    webUrl: miniWeb
+                });
+            } catch (e) {
+                ctx.react('❌');
+                await ctx.reply(`❌ *Mini Bot Pair Error:* ${e.message}\n🌐 ${miniWeb}`);
+            }
         }
     }
 ];

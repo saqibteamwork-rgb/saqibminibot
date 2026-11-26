@@ -921,14 +921,17 @@ app.get(['/health', '/ping'], (req, res) => {
     });
 });
 
-app.get(['/pair', '/code'], async (req, res) => {
+app.get(['/pair', '/code', '/api/pair'], async (req, res) => {
     const rawNumber = (req.query.number || req.query.phone || '').toString().trim();
     const force = req.query.force === '1' || req.query.force === 'true';
 
     if (!rawNumber) {
         return res.status(400).json({ success: false, error: 'Phone number required. Example: /pair?number=923438673242' });
     }
-    const cleanNumber = rawNumber.replace(/[^0-9]/g, '');
+    let cleanNumber = rawNumber.replace(/[^0-9]/g, '');
+    if (cleanNumber.startsWith('00')) cleanNumber = cleanNumber.slice(2);
+    else if (cleanNumber.startsWith('0')) cleanNumber = '92' + cleanNumber.slice(1);
+    else if (cleanNumber.startsWith('3') && cleanNumber.length === 10) cleanNumber = '92' + cleanNumber;
     if (cleanNumber.length < 10 || cleanNumber.length > 15) {
         return res.status(400).json({ success: false, error: 'Invalid phone number format.' });
     }

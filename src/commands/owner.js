@@ -189,7 +189,7 @@ const commands = [
     },
     {
         name: 'addowner',
-        aliases: ['addsudo', 'ownadd'],
+        aliases: ['addsudo', 'ownadd', 'addown'],
         category: 'owner',
         desc: 'Naya bot owner / sudo user add karein',
         ownerOnly: true,
@@ -203,7 +203,7 @@ const commands = [
     },
     {
         name: 'delowner',
-        aliases: ['delsudo', 'owndel'],
+        aliases: ['delsudo', 'owndel', 'delown', 'rmown'],
         category: 'owner',
         desc: 'Bot owner / sudo list se remove karein',
         ownerOnly: true,
@@ -217,7 +217,7 @@ const commands = [
     },
     {
         name: 'listowners',
-        aliases: ['ownlist', 'sudo'],
+        aliases: ['ownlist', 'sudo', 'owners', 'listown', 'ownerlist'],
         category: 'owner',
         desc: 'Tamam Bot Owners ki list dekhein',
         ownerOnly: true,
@@ -232,7 +232,7 @@ const commands = [
     },
     {
         name: 'block',
-        aliases: [],
+        aliases: ['blk', 'blockuser'],
         category: 'owner',
         desc: 'User ko WhatsApp par block karein',
         ownerOnly: true,
@@ -246,7 +246,7 @@ const commands = [
     },
     {
         name: 'unblock',
-        aliases: [],
+        aliases: ['unblk', 'unblockuser'],
         category: 'owner',
         desc: 'User ko WhatsApp par unblock karein',
         ownerOnly: true,
@@ -301,7 +301,7 @@ const commands = [
     },
     {
         name: 'broadcast',
-        aliases: ['bc', 'bcgc'],
+        aliases: ['bc', 'bcgc', 'bcast', 'announce'],
         category: 'owner',
         desc: 'Sab joined groups mein broadcast bhejein',
         ownerOnly: true,
@@ -381,7 +381,7 @@ const commands = [
     },
     {
         name: 'antidelete',
-        aliases: ['antidel'],
+        aliases: ['antidel', 'ad', 'delprotect'],
         category: 'owner',
         desc: 'Deleted messages ko recover karne ka toggle',
         ownerOnly: true,
@@ -408,7 +408,7 @@ const commands = [
     },
     {
         name: 'setpp',
-        aliases: ['setbotpp'],
+        aliases: ['setbotpp', 'setdp', 'setpfp', 'fullpp'],
         category: 'owner',
         desc: 'Reply ki gayi image ko bot DP lagayein',
         ownerOnly: true,
@@ -426,7 +426,7 @@ const commands = [
     },
     {
         name: 'removepp',
-        aliases: ['delpp'],
+        aliases: ['delpp', 'cleardp', 'removebotpp'],
         category: 'owner',
         desc: 'Bot profile picture remove karein',
         ownerOnly: true,
@@ -483,7 +483,7 @@ const commands = [
     },
     {
         name: 'restart',
-        aliases: ['reboot'],
+        aliases: ['reboot', 'res', 'restartbot'],
         category: 'owner',
         desc: 'Bot process ko clean restart karein (Heroku auto-boots)',
         ownerOnly: true,

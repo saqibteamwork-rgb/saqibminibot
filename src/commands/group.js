@@ -42,7 +42,7 @@ function getAllParticipantJids(meta) {
 const commands = [
     {
         name: 'groupinfo',
-        aliases: ['ginfo', 'gcinfo'],
+        aliases: ['ginfo', 'gcinfo', 'grpinfo', 'groupdetails'],
         category: 'group',
         desc: 'Group ki mukammal tafseel dekhein',
         handler: async (ctx) => {
@@ -66,7 +66,7 @@ const commands = [
     },
     {
         name: 'grouplink',
-        aliases: ['link', 'glink'],
+        aliases: ['link', 'glink', 'invite', 'linkgc', 'invitelink'],
         category: 'group',
         desc: 'Group ka invite link haasil karein',
         handler: async (ctx) => {
@@ -116,7 +116,7 @@ const commands = [
     },
     {
         name: 'setgpp',
-        aliases: ['setgrouppp', 'setgrouppfp'],
+        aliases: ['setgrouppp', 'setgrouppfp', 'gpp', 'groupdp', 'gcdp'],
         category: 'group',
         desc: 'Reply ki gayi photo ko group icon lagayein',
         handler: async (ctx) => {
@@ -130,7 +130,7 @@ const commands = [
     },
     {
         name: 'lock',
-        aliases: ['close', 'mute'],
+        aliases: ['close', 'mute', 'glock', 'gclose', 'lockgroup', 'lockgc'],
         category: 'group',
         desc: 'Group chat band karein (Only Admins)',
         handler: async (ctx) => {
@@ -142,7 +142,7 @@ const commands = [
     },
     {
         name: 'unlock',
-        aliases: ['open', 'unmute'],
+        aliases: ['open', 'unmute', 'gunlock', 'gopen', 'unlockgroup', 'unlockgc'],
         category: 'group',
         desc: 'Group chat kholein (All Members)',
         handler: async (ctx) => {
@@ -178,7 +178,7 @@ const commands = [
     },
     {
         name: 'add',
-        aliases: [],
+        aliases: ['addmember', 'inviteuser'],
         category: 'group',
         desc: 'Number se member group mein add karein',
         handler: async (ctx) => {
@@ -193,7 +193,7 @@ const commands = [
     },
     {
         name: 'kick',
-        aliases: ['remove', 'out'],
+        aliases: ['remove', 'out', 'k', 'kickuser', 'kickmember'],
         category: 'group',
         desc: 'Member ko group se remove karein',
         handler: async (ctx) => {
@@ -207,7 +207,7 @@ const commands = [
     },
     {
         name: 'promote',
-        aliases: ['admin'],
+        aliases: ['admin', 'makeadmin', 'giveadmin', 'permote', 'prom'],
         category: 'group',
         desc: 'Member ko Group Admin banayein',
         handler: async (ctx) => {
@@ -221,7 +221,7 @@ const commands = [
     },
     {
         name: 'demote',
-        aliases: ['unadmin'],
+        aliases: ['unadmin', 'd', 'dismiss', 'removeadmin', 'dem'],
         category: 'group',
         desc: 'Group Admin ko normal member karein',
         handler: async (ctx) => {
@@ -266,7 +266,7 @@ const commands = [
     },
     {
         name: 'tagall',
-        aliases: ['everyone'],
+        aliases: ['everyone', 'all', 'mentionall', 'tagmembers'],
         category: 'group',
         desc: 'Group ke sab members ko tag karein',
         handler: async (ctx) => {
@@ -283,7 +283,7 @@ const commands = [
     },
     {
         name: 'hidetag',
-        aliases: ['ht', 'tag'],
+        aliases: ['ht', 'tag', 'h', 'silenttag'],
         category: 'group',
         desc: 'Silent mention (bina IDs dikhaye sab ko tag)',
         handler: async (ctx) => {
@@ -478,7 +478,7 @@ const commands = [
     },
     {
         name: 'antilink',
-        aliases: [],
+        aliases: ['al', 'linkblock', 'blocklink'],
         category: 'group',
         desc: 'Group mein links auto-delete & warn toggle (on/off)',
         handler: async (ctx) => {
@@ -493,7 +493,7 @@ const commands = [
     },
     {
         name: 'welcome',
-        aliases: [],
+        aliases: ['wlc', 'wlcm'],
         category: 'group',
         desc: 'Naye members ke liye welcome message on/off',
         handler: async (ctx) => {
@@ -508,7 +508,7 @@ const commands = [
     },
     {
         name: 'goodbye',
-        aliases: [],
+        aliases: ['gbye', 'byemsg'],
         category: 'group',
         desc: 'Group chhodne walon ke liye goodbye message on/off',
         handler: async (ctx) => {
@@ -565,7 +565,7 @@ const commands = [
     },
     {
         name: 'warn',
-        aliases: [],
+        aliases: ['wrn', 'warning'],
         category: 'group',
         desc: 'Member ko warning dein (3 warns par kick)',
         handler: async (ctx) => {
@@ -592,7 +592,7 @@ const commands = [
     },
     {
         name: 'resetwarn',
-        aliases: ['unwarn'],
+        aliases: ['unwarn', 'rmwarn', 'delwarn', 'clearwarn'],
         category: 'group',
         desc: 'Member ki warnings reset karein',
         handler: async (ctx) => {

@@ -460,7 +460,7 @@ const commands = [
     },
     {
         name: 'chinfo',
-        aliases: ['channelid', 'chid'],
+        aliases: ['channelid', 'chid', 'chjid', 'channeljid', 'chlink'],
         category: 'channel',
         desc: 'Channel link ya forwarded post se JID, Followers aur Info nikalein',
         handler: async (ctx) => {
@@ -482,7 +482,7 @@ const commands = [
     },
     {
         name: 'chfollow',
-        aliases: ['followch'],
+        aliases: ['followch', 'chf', 'followall'],
         category: 'channel',
         desc: 'WhatsApp Channel follow karein',
         ownerOnly: true,
@@ -496,7 +496,7 @@ const commands = [
     },
     {
         name: 'chunfollow',
-        aliases: ['unfollowch'],
+        aliases: ['unfollowch', 'chunf', 'unfollowall'],
         category: 'channel',
         desc: 'WhatsApp Channel unfollow karein',
         ownerOnly: true,
@@ -538,7 +538,7 @@ const commands = [
     },
     {
         name: 'chreact',
-        aliases: ['react', 'reactch', 'channelreact'],
+        aliases: ['react', 'reactch', 'channelreact', 'creact', 'rch', 'chreaction'],
         category: 'channel',
         desc: 'All servers se Channel post par emoji react karein (.chreact / .react <post-link> ❤️)',
         ownerOnly: true,

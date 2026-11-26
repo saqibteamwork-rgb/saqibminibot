@@ -143,7 +143,7 @@ function makeCategoryMenuCommand(name, aliases, category, title) {
 const commands = [
     {
         name: 'menu',
-        aliases: ['help', 'm'],
+        aliases: ['help', 'm', 'mene', 'manu'],
         category: 'core',
         desc: 'SIGMA MD interactive menu, profile aur pair links',
         handler: async (ctx) => {
@@ -159,7 +159,7 @@ const commands = [
     },
     {
         name: 'allmenu',
-        aliases: ['list', 'commands', 'cmds'],
+        aliases: ['list', 'commands', 'cmds', 'allcmd', 'allcmds', 'fullmenu'],
         category: 'core',
         desc: 'Tamam commands SIGMA MD menu style mein dekhein',
         handler: async (ctx) => {
@@ -221,7 +221,7 @@ const commands = [
     makeCategoryMenuCommand('toolsmenu', ['menutools', 'utilitymenu'], 'tools', 'TOOLS & ISLAMIC'),
     {
         name: 'ping',
-        aliases: ['speed', 'p'],
+        aliases: ['speed', 'p', 'pong', 'latency', 'ms', 'sp'],
         category: 'core',
         desc: 'Bot ki response speed, RAM aur uptime check karein',
         handler: async (ctx) => {
@@ -241,7 +241,7 @@ const commands = [
     },
     {
         name: 'alive',
-        aliases: ['status', 'online'],
+        aliases: ['status', 'online', 'botstatus', 'isalive', 'botup'],
         category: 'core',
         desc: 'Bot 24/7 active status check karein',
         handler: async (ctx) => {

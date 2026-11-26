@@ -95,7 +95,7 @@ function stylizeText(input, alphabet) {
 const commands = [
     {
         name: 'translate',
-        aliases: ['tr', 'trt'],
+        aliases: ['tr', 'trt', 'trans', 'trns'],
         category: 'tools',
         desc: 'Kisi text ya reply ko kisi bhi language mein translate karein',
         handler: async (ctx) => {
@@ -139,7 +139,7 @@ const commands = [
     },
     {
         name: 'tts',
-        aliases: ['speak', 'voice'],
+        aliases: ['speak', 'voice', 'bolo', 'voicenote'],
         category: 'tools',
         desc: 'Text ko Audio Voice mein badlein (.tts en Hello)',
         handler: async (ctx) => {
@@ -156,7 +156,7 @@ const commands = [
     },
     {
         name: 'weather',
-        aliases: ['mausam', 'w'],
+        aliases: ['mausam', 'w', 'mosam', 'temp'],
         category: 'tools',
         desc: 'Kisi bhi shehar ka live weather report dekhein',
         handler: async (ctx) => {
@@ -202,7 +202,7 @@ const commands = [
     },
     {
         name: 'qr',
-        aliases: ['qrcode'],
+        aliases: ['qrcode', 'qrgen'],
         category: 'tools',
         desc: 'Kisi text ya URL ka QR Code image banayein',
         handler: async (ctx) => {
@@ -213,7 +213,7 @@ const commands = [
     },
     {
         name: 'shorturl',
-        aliases: ['short', 'tinyurl'],
+        aliases: ['short', 'tinyurl', 'shorten'],
         category: 'tools',
         desc: 'Lamba URL short karein',
         handler: async (ctx) => {
@@ -228,7 +228,7 @@ const commands = [
     },
     {
         name: 'calc',
-        aliases: ['math', 'calculate'],
+        aliases: ['math', 'calculate', 'hisab', 'calculator'],
         category: 'tools',
         desc: 'Safe Math Calculator (.calc (25*4)+10)',
         handler: async (ctx) => {
@@ -370,7 +370,7 @@ const commands = [
     },
     {
         name: 'passgen',
-        aliases: ['password', 'genpass'],
+        aliases: ['password', 'genpass', 'gpass', 'strongpass'],
         category: 'tools',
         desc: 'Strong random password banayein (.passgen 16)',
         handler: async (ctx) => {
@@ -384,7 +384,7 @@ const commands = [
     },
     {
         name: 'readmore',
-        aliases: ['rm'],
+        aliases: ['rm', 'spoiler', 'rmore'],
         category: 'tools',
         desc: 'WhatsApp ReadMore message banayein (.readmore Top | Bottom)',
         handler: async (ctx) => {
@@ -457,7 +457,7 @@ const commands = [
     },
     {
         name: 'prayertime',
-        aliases: ['namaz', 'salah'],
+        aliases: ['namaz', 'salah', 'praytime', 'namaztime'],
         category: 'tools',
         desc: 'Shehar ke daily Namaz timings (.namaz Lahore)',
         handler: async (ctx) => {
@@ -499,7 +499,7 @@ const commands = [
     },
     {
         name: 'jid',
-        aliases: ['getjid', 'id'],
+        aliases: ['getjid', 'id', 'chatid', 'gcjid', 'gjid'],
         category: 'tools',
         desc: 'Current chat, user ya replied user ka WhatsApp JID dekhein',
         handler: async (ctx) => {
@@ -509,7 +509,7 @@ const commands = [
     },
     {
         name: 'getpp',
-        aliases: ['dp', 'profilepic'],
+        aliases: ['dp', 'profilepic', 'getdp', 'pfp', 'getpfp', 'pp', 'userdp', 'viewdp', 'showdp'],
         category: 'tools',
         desc: 'Apni ya mentioned user ki WhatsApp profile photo fetch karein',
         handler: async (ctx) => {

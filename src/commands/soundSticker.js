@@ -207,7 +207,7 @@ async function fetchYoutubeAudioIfAvailable(query) {
 const commands = [
     {
         name: 'ssound',
-        aliases: ['stickersound', 'soundsticker', 'stikersound', 'stickeraudio', 'saudio', 'sfxsticker'],
+        aliases: ['stickersound', 'soundsticker', 'stikersound', 'stickeraudio', 'saudio', 'sfxsticker', 'stksound', 'sfx', 'sounds', 'soundstk', 'addsound', 'audiosticker', 'voicesticker'],
         category: 'tools',
         desc: 'Kisi bhi Sticker par Sound Effect ya Voice lagayein (.ssound sigma)',
         handler: async (ctx) => {

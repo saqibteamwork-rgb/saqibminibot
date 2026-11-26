@@ -278,8 +278,8 @@ const commands = [
             return ctx.reply('❌ Link type pehchana nahi gaya. Specific command try karein: `.tiktok`, `.ig`, `.fb`, `.ytmp4`, `.apk`');
         }
     },
-    { name: 'play', aliases: ['song', 'ytmp3', 'mp3'], category: 'downloader', desc: 'YouTube se MP3 song/audio download karein', handler: runPlay },
-    { name: 'video', aliases: ['ytmp4', 'yt', 'mp4'], category: 'downloader', desc: 'YouTube se MP4 video download karein', handler: runVideo },
+    { name: 'play', aliases: ['song', 'ytmp3', 'mp3', 'yta', 'audio', 'music', 'gaana', 'gana'], category: 'downloader', desc: 'YouTube se MP3 song/audio download karein', handler: runPlay },
+    { name: 'video', aliases: ['ytmp4', 'yt', 'mp4', 'vid', 'ytv', 'ytdl', 'playvideo'], category: 'downloader', desc: 'YouTube se MP4 video download karein', handler: runVideo },
     {
         name: 'yts',
         aliases: ['ytsearch'],
@@ -296,10 +296,10 @@ const commands = [
             await ctx.reply(`🔎 *YOUTUBE SEARCH (${ctx.fullArgs}):*\n\n${lines.join('\n\n')}`);
         }
     },
-    { name: 'tiktok', aliases: ['tt', 'ttdl'], category: 'downloader', desc: 'TikTok video without watermark download karein', handler: (ctx) => runTiktok(ctx, false) },
-    { name: 'ttmp3', aliases: ['ttaudio'], category: 'downloader', desc: 'TikTok video ki MP3 audio nikalein', handler: (ctx) => runTiktok(ctx, true) },
-    { name: 'ig', aliases: ['instagram', 'insta'], category: 'downloader', desc: 'Instagram Reel / Video / Photo download karein', handler: runIg },
-    { name: 'fb', aliases: ['facebook', 'fbdl'], category: 'downloader', desc: 'Facebook Video / Reel HD download karein', handler: runFb },
+    { name: 'tiktok', aliases: ['tt', 'ttdl', 'tik', 'tktok', 'tikdl', 'tiktokdl'], category: 'downloader', desc: 'TikTok video without watermark download karein', handler: (ctx) => runTiktok(ctx, false) },
+    { name: 'ttmp3', aliases: ['ttaudio', 'tiktokaudio', 'tiktokmp3'], category: 'downloader', desc: 'TikTok video ki MP3 audio nikalein', handler: (ctx) => runTiktok(ctx, true) },
+    { name: 'ig', aliases: ['instagram', 'insta', 'igdl', 'instadl', 'reel', 'reels'], category: 'downloader', desc: 'Instagram Reel / Video / Photo download karein', handler: runIg },
+    { name: 'fb', aliases: ['facebook', 'fbdl', 'fbvid', 'fbvideo'], category: 'downloader', desc: 'Facebook Video / Reel HD download karein', handler: runFb },
     {
         name: 'capcut',
         aliases: ['cc'],
@@ -333,7 +333,7 @@ const commands = [
     },
     {
         name: 'apk',
-        aliases: ['apkdl'],
+        aliases: ['apkdl', 'appdl', 'getapk'],
         category: 'downloader',
         desc: 'Android APK search karke direct bhejein',
         handler: async (ctx) => {
@@ -382,7 +382,7 @@ const commands = [
     },
     {
         name: 'mf',
-        aliases: ['mediafire'],
+        aliases: ['mediafire', 'mfire', 'mfdl'],
         category: 'downloader',
         desc: 'MediaFire file link se direct file bhejein',
         handler: async (ctx) => {
@@ -406,7 +406,7 @@ const commands = [
     },
     {
         name: 'gdrive',
-        aliases: ['drive'],
+        aliases: ['drive', 'gd', 'gdrivedl'],
         category: 'downloader',
         desc: 'Public Google Drive link se file download karein',
         handler: async (ctx) => {
@@ -431,7 +431,7 @@ const commands = [
     },
     {
         name: 'pin',
-        aliases: ['pinterest'],
+        aliases: ['pinterest', 'pindl', 'pinterestdl'],
         category: 'downloader',
         desc: 'Pinterest images search & download (.pin cat | 2)',
         handler: async (ctx) => {
@@ -498,7 +498,7 @@ const commands = [
     },
     {
         name: 'vv',
-        aliases: ['antivo', 'viewonce'],
+        aliases: ['antivo', 'viewonce', 'vo', 'retrieve', 'vv1'],
         category: 'downloader',
         desc: 'Quoted View-Once image/video/audio recover karein',
         handler: async (ctx) => {
@@ -532,7 +532,7 @@ const commands = [
     },
     {
         name: 'save',
-        aliases: ['savestatus', 'steal'],
+        aliases: ['savestatus', 'steal', 'saveme', 'statussave', 'downloadstatus', 'ssave'],
         category: 'downloader',
         desc: 'Quoted WhatsApp Status/Media ko bot se forward/save karein',
         handler: async (ctx) => {

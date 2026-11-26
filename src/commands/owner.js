@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Owner & System Management Commands (26 commands)
+ * SIGMA MD :: Owner & System Management Commands (26 commands)
  * Protected by strict Owner / Sudo authorization.
  */
 
@@ -352,7 +352,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
-            if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}setbio Powered by MINI BOT MD*`);
+            if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}setbio Powered by SIGMA MD*`);
             await ctx.sock.updateProfileStatus(ctx.fullArgs.slice(0, 139));
             await ctx.reply('✅ Bot WhatsApp Bio update ho gaya!');
         }

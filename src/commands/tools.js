@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Useful Search, Converter, Islamic & Utility Tools (25 commands)
+ * SIGMA MD :: Useful Search, Converter, Islamic & Utility Tools (25 commands)
  */
 
 const crypto = require('crypto');

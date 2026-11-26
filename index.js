@@ -2,10 +2,10 @@
 
 /**
  * ============================================================================
- * MINI BOT MD v2.0 :: ULTRA-LIGHTWEIGHT 24/7 ZERO-SLEEP WHATSAPP BOT
+ * SIGMA MD v2.0 :: ULTRA-LIGHTWEIGHT 24/7 ZERO-SLEEP WHATSAPP BOT
  * ============================================================================
  * - Baileys v7 (@whiskeysockets/baileys) with @lid <-> @s.whatsapp.net support
- * - 140+ Commands across Menu, Owner, Group, Channel, Downloader & Tools
+ * - 145+ Commands across Menu, Owner, Group, Channel, Downloader & Tools
  * - Lean MongoDB Atlas cloud backup + 401 anti-logout shield
  * - Safe /pair endpoint + 25s Heroku keepalive + crash guards
  * ============================================================================
@@ -438,7 +438,7 @@ async function initWhatsApp(pairingNumber = null) {
                         isForwarded: true,
                         forwardedNewsletterMessageInfo: {
                             newsletterJid: cfg.newsletterJid,
-                            newsletterName: cfg.newsletterName || cfg.botName || 'Mr SAQIB',
+                            newsletterName: cfg.newsletterName || cfg.botName || 'SIGMA MD',
                             serverMessageId: 1
                         },
                         ...existingCtx
@@ -510,8 +510,10 @@ async function initWhatsApp(pairingNumber = null) {
                               `┃ 🛠️ *Commands:* ${totalCmds}+ Loaded\n` +
                               `┃ 💾 *RAM:* ${getMemoryUsageMb()} MB / 512 MB\n` +
                               `┃ ⏱️ *KeepAlive:* 25s Zero-Sleep Active\n` +
+                              `┃ 🤖 *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmaminibot.vercel.app'}\n` +
+                              `┃ ⚡ *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}\n` +
                               `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-                              `_Type *${cfg.prefix}menu* to explore all categories!_`
+                              `_Type *${cfg.prefix}menu* ya *${cfg.prefix}profile* to explore!_`
                     });
                 } catch (_) {}
 
@@ -886,9 +888,11 @@ app.get(['/pair', '/code'], async (req, res) => {
 
 app.get('/', (req, res) => {
     const cfg = configStore.getConfig();
-    const botNameHtml = escapeHtml(cfg.botName);
+    const botNameHtml = escapeHtml(cfg.botName || 'SIGMA MD');
     const ownerNameHtml = escapeHtml(cfg.ownerName);
     const ownerNumberHtml = escapeHtml(cfg.owners[0] || '923438673242');
+    const miniPairHref = escapeHtml(cfg.miniPairUrl || 'https://sigmaminibot.vercel.app');
+    const mainPairHref = escapeHtml(cfg.mainPairUrl || 'https://mrsaqib.me/pair');
     const totalCmds = registry.getAllCommands().length;
     const memMb = getMemoryUsageMb();
     const uptimeStr = formatUptime(getUptimeSec());
@@ -944,7 +948,11 @@ app.get('/', (req, res) => {
             <div class="code-val" id="codeDisplay">----</div>
             <div style="font-size: 12px; color: #cbd5e1;">WhatsApp &gt; Linked Devices &gt; Link with Phone Number</div>
         </div>
-        <div class="footer">Built by ${ownerNameHtml} &bull; Heroku 24/7 Engine</div>
+        <div style="margin-top: 16px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px;">
+            <a href="${miniPairHref}" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: none; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(56,189,248,0.3); background: rgba(56,189,248,0.08);">🤖 Mini Bot Pair</a>
+            <a href="${mainPairHref}" target="_blank" rel="noopener noreferrer" style="color: #34d399; text-decoration: none; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(52,211,153,0.3); background: rgba(52,211,153,0.08);">⚡ Main Bot Pair</a>
+        </div>
+        <div class="footer">${botNameHtml} • Built by ${ownerNameHtml} &bull; Heroku 24/7 Engine</div>
     </div>
     <script>
         async function getPairingCode() {

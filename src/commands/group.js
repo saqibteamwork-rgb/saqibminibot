@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Group Moderation, Engagement & Settings Commands (32 commands)
+ * SIGMA MD :: Group Moderation, Engagement & Settings Commands (32 commands)
  * Includes automatic Group-only, Group-Admin, and Bot-Admin permission guards.
  */
 

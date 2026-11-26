@@ -1,7 +1,7 @@
 {
-  "name": "mini-bot-zero-sleep",
-  "description": "Ultra-lightweight 24/7 Zero-Sleep WhatsApp MD Bot for Heroku with 120+ Commands, Pairing Code & Keepalive",
-  "keywords": ["whatsapp", "baileys", "heroku", "mini-bot"],
+  "name": "sigma-md-zero-sleep",
+  "description": "SIGMA MD :: Ultra-lightweight 24/7 Zero-Sleep WhatsApp MD Bot for Heroku with 145+ Commands, Pairing Code & Keepalive",
+  "keywords": ["whatsapp", "baileys", "heroku", "sigma-md"],
   "buildpacks": [
     {
       "url": "heroku/nodejs"
@@ -19,7 +19,7 @@
     "BOT_NAME": {
       "description": "Name of your bot",
       "required": false,
-      "value": "MINI BOT MD"
+      "value": "SIGMA MD"
     },
     "OWNER_NAME": {
       "description": "Name of bot owner",
@@ -39,7 +39,7 @@
     "CHANNEL_NAME": {
       "description": "Channel title displayed on View Channel forward badge",
       "required": false,
-      "value": "Mr SAQIB"
+      "value": "SIGMA MD"
     }
   },
   "formation": {

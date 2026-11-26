@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Multi-Platform Downloader & Media Saver Commands (20 commands)
+ * SIGMA MD :: Multi-Platform Downloader & Media Saver Commands (20 commands)
  * Uses pure JS + streaming URL payloads to stay well within Heroku 512MB RAM.
  */
 
@@ -186,7 +186,7 @@ async function runVideo(ctx) {
     await ctx.sock.sendMessage(ctx.from, {
         video: { url: r.url },
         mimetype: 'video/mp4',
-        caption: `🎬 *${r.title}*\n⏳ ${r.duration || 'HD'}\n⚡ _MINI BOT MD_`
+        caption: `🎬 *${r.title}*\n⏳ ${r.duration || 'HD'}\n⚡ _${configStore.getConfig().botName || 'SIGMA MD'}_`
     }, ctx.quoteOpt);
     await ctx.react('✅');
 }

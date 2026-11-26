@@ -1,30 +1,235 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Menu & Core System Commands
+ * SIGMA MD :: Menu, Profile & Core System Commands
+ * Replicates the signature Style 1 aesthetic menu with preloaded SIGMA artwork,
+ * live user profile card, and Mini Bot + Main Bot pair links.
  */
 
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const configStore = require('../configStore');
 const { formatUptime } = require('../mediaHelper');
 
-function formatCategoryBlock(title, emoji, cmds, prefix) {
-    const lines = cmds.map((c) => `┃ • *${prefix}${c.name}* — ${c.desc}`);
+const MENU_IMAGE_PATH = path.join(__dirname, '..', '..', 'assets', 'sigma_menu.png');
+let PRELOADED_MENU_IMAGE = null;
+try {
+    if (fs.existsSync(MENU_IMAGE_PATH)) {
+        PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
+    }
+} catch (_) {}
+
+function getMenuImageBuffer() {
+    if (PRELOADED_MENU_IMAGE) return PRELOADED_MENU_IMAGE;
+    try {
+        if (fs.existsSync(MENU_IMAGE_PATH)) {
+            PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
+        }
+    } catch (_) {}
+    return PRELOADED_MENU_IMAGE;
+}
+
+function toSansBold(str) {
+    return String(str || '').replace(/[A-Za-z0-9]/g, (c) => {
+        const code = c.charCodeAt(0);
+        if (code >= 65 && code <= 90) return String.fromCodePoint(0x1D5D4 + code - 65);
+        if (code >= 97 && code <= 122) return String.fromCodePoint(0x1D5EE + code - 97);
+        if (code >= 48 && code <= 57) return String.fromCodePoint(0x1D7EC + code - 48);
+        return c;
+    });
+}
+
+function toSansItalic(str) {
+    return String(str || '').replace(/[A-Za-z]/g, (c) => {
+        const code = c.charCodeAt(0);
+        if (code >= 65 && code <= 90) return String.fromCodePoint(0x1D608 + code - 65);
+        if (code >= 97 && code <= 122) return String.fromCodePoint(0x1D622 + code - 97);
+        return c;
+    });
+}
+
+const CATEGORY_SECTIONS = [
+    { key: 'core', title: 'MENU & CORE', aliases: ['core', 'main', 'general'] },
+    { key: 'owner', title: 'OWNER', aliases: ['owner', 'onwer', 'own', 'sudo', 'ownermenu'] },
+    { key: 'group', title: 'GROUP', aliases: ['group', 'gc', 'grp', 'groupmenu', 'gcmenu'] },
+    { key: 'channel', title: 'CHANNEL', aliases: ['channel', 'ch', 'chnl', 'channelmenu', 'chmenu'] },
+    { key: 'downloader', title: 'DOWNLOAD', aliases: ['dl', 'download', 'downloader', 'down', 'dlmenu'] },
+    { key: 'tools', title: 'TOOLS & ISLAMIC', aliases: ['tool', 'tools', 'utility', 'util', 'islamic', 'toolsmenu'] }
+];
+
+function resolveCategorySection(query) {
+    const clean = String(query || '').toLowerCase().replace(/[^a-z0-9&]/g, '').trim();
+    if (!clean) return null;
+    for (const sec of CATEGORY_SECTIONS) {
+        if (sec.key === clean || sec.aliases.includes(clean)) return sec;
+    }
+    return null;
+}
+
+function makeBox(title, cmds, prefix) {
+    const head = `┌───⭓ ⚡ ${toSansBold(title.toUpperCase())} ⭓───\n`;
+    const body = cmds.map((c) => `│ ⬡ ${prefix}${toSansBold(c.name)}`).join('\n') + '\n';
+    const foot = `└───────────────────⭓\n`;
+    return head + body + foot;
+}
+
+function buildMenuHeader(ctx, displayedCommands) {
+    const cfg = configStore.getConfig();
+    const botName = cfg.botName || 'SIGMA MD';
+    const ownerName = cfg.ownerName || 'MR SAQIB';
+    const userName = String(ctx.msg?.pushName || ctx.senderDigits || 'User').replace(/[*_~`]/g, '').trim().slice(0, 40) || 'User';
+    const p = ctx.prefix || '.';
+    const usedMem = ctx.runtime.getMemoryUsageMb();
+    const totalMem = Math.round(os.totalmem() / (1024 * 1024));
+    const runtimeStr = formatUptime(ctx.runtime.getUptimeSec());
+    const dateStr = new Date().toLocaleDateString('en-US', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+    });
+    const modeLabel = cfg.mode === 'public' ? 'Public 🌍' : (cfg.mode === 'self' ? 'Self 🔒' : 'Private 🔒');
+
     return (
-        `╭━━━〔 ${emoji} *${title} (${cmds.length})* 〕━━━┈⊷\n` +
-        `${lines.join('\n')}\n` +
-        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+        `╭━━━〔 ⚡ ${toSansBold(botName)} ⚡ 〕━━━┈⊷\n` +
+        `┃ 👤 ${toSansBold('User')}: _${userName}_\n` +
+        `┃ 👑 ${toSansBold('Owner')}: ${toSansBold(ownerName)}\n` +
+        `┃ 🟢 ${toSansBold('Status')}: ${toSansBold('Connected')} 🟢\n` +
+        `┃ ⚙️ ${toSansBold('System')}: ${toSansBold('Active')} ⚡\n` +
+        `┃ 🌐 ${toSansBold('Server')}: ${toSansBold('Running')} 🚀\n` +
+        `┃ 🔥 ${toSansBold('Modules')}: ${toSansBold('Active')} 🔥\n` +
+        `┃ 📱 ${toSansBold('Baileys')}: _Multi-Device_\n` +
+        `┃ 📅 ${toSansBold('Date')}: _${dateStr}_\n` +
+        `┃ ⏳ ${toSansBold('Uptime')}: _${runtimeStr}_\n` +
+        `┃ 🔑 ${toSansBold('Prefix')}: [ ${p} ]\n` +
+        `┃ 🛡️ ${toSansBold('Mode')}: _${modeLabel}_\n` +
+        `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / ${totalMem}MB_\n` +
+        `┃ 📂 ${toSansBold('Total Commands')}: ${toSansBold(String(displayedCommands))}\n` +
+        `┃ 📦 ${toSansBold('Version')}: _2.0.0_\n` +
+        `╰━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+        ` ➤ ${p}${toSansBold('menu')} _type karein commands ke liye_`
     );
 }
 
-function makeCategoryMenuCommand(name, aliases, category, title, emoji) {
+function buildPairLinksCard(cfg) {
+    const botName = cfg.botName || 'SIGMA MD';
+    const ownerName = cfg.ownerName || 'MR SAQIB';
+    const miniPair = cfg.miniPairUrl || 'https://sigmaminibot.vercel.app';
+    const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
+
+    return (
+        `╭━━━〔 👑 ${toSansBold('POWERED BY')} 〕━━━┈⊷\n` +
+        `┃ ⚡ ${toSansBold(botName)}\n` +
+        `┃ 🚀 ${toSansBold(ownerName)}\n` +
+        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+        `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
+        `┃ 🤖 *Mini Bot Pair Link:*\n` +
+        `┃ ${miniPair}\n` +
+        `┃ ⚡ *Main Bot Pair Link:*\n` +
+        `┃ ${mainPair}\n` +
+        `┃ 🔍 *Search on Google:*\n` +
+        `┃ google.com/search?q=mr+saqib\n` +
+        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+    );
+}
+
+function buildNewsletterContext(cfg) {
+    const botName = cfg.botName || 'SIGMA MD';
+    return {
+        forwardingScore: 999,
+        isForwarded: true,
+        forwardedNewsletterMessageInfo: {
+            newsletterJid: cfg.newsletterJid || '120363431913895899@newsletter',
+            newsletterName: botName,
+            serverMessageId: 1
+        }
+    };
+}
+
+function buildProfileAdContext(cfg, userName = 'User') {
+    const botName = cfg.botName || 'SIGMA MD';
+    const ownerName = cfg.ownerName || 'MR SAQIB';
+    const miniPair = cfg.miniPairUrl || 'https://sigmaminibot.vercel.app';
+    const imgBuf = getMenuImageBuffer();
+
+    const adReply = {
+        title: `⚡ ${botName}`,
+        body: `👤 ${userName} • 👑 ${ownerName}`,
+        mediaType: 1,
+        sourceUrl: miniPair,
+        renderLargerThumbnail: false
+    };
+    if (imgBuf) {
+        adReply.thumbnail = imgBuf;
+    }
+
+    return {
+        ...buildNewsletterContext(cfg),
+        externalAdReply: adReply
+    };
+}
+
+async function sendStyledMenu(ctx, sections, headerCommandCount) {
+    const cfg = configStore.getConfig();
+    const headerText = buildMenuHeader(ctx, headerCommandCount);
+    const boxesText = sections
+        .map((sec) => {
+            const cmds = ctx.registry.getByCategory(sec.key);
+            return cmds.length ? makeBox(sec.title, cmds, ctx.prefix || '.') : '';
+        })
+        .filter(Boolean)
+        .join('\n');
+    const linksCard = buildPairLinksCard(cfg);
+    const bodyWithLinks = `${boxesText.trim()}\n\n${linksCard}`.trim();
+    const fullText = `${headerText}\n\n${bodyWithLinks}`;
+    const userName = String(ctx.msg?.pushName || ctx.senderDigits || 'User').trim() || 'User';
+
+    const newsletterCtx = buildNewsletterContext(cfg);
+    const adCtx = buildProfileAdContext(cfg, userName);
+    const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
+    const imgBuf = getMenuImageBuffer();
+
+    const sendImageSafe = (captionText) => Promise.race([
+        ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: captionText, contextInfo: newsletterCtx }, replyOpts),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Menu image send timeout')), 8000))
+    ]);
+
+    if (imgBuf) {
+        if (fullText.length <= 1500) {
+            try {
+                await sendImageSafe(fullText);
+                await ctx.sock.sendMessage(ctx.from, { text: linksCard, contextInfo: adCtx });
+                return;
+            } catch (_) {
+                await ctx.sock.sendMessage(ctx.from, { text: fullText, contextInfo: adCtx }, replyOpts);
+                return;
+            }
+        }
+        try {
+            await sendImageSafe(headerText);
+            await ctx.sock.sendMessage(ctx.from, { text: bodyWithLinks, contextInfo: adCtx });
+            return;
+        } catch (_) {
+            await ctx.sock.sendMessage(ctx.from, { text: fullText, contextInfo: adCtx }, replyOpts);
+            return;
+        }
+    }
+
+    await ctx.sock.sendMessage(ctx.from, { text: headerText, contextInfo: newsletterCtx }, replyOpts);
+    await ctx.sock.sendMessage(ctx.from, { text: bodyWithLinks, contextInfo: adCtx });
+}
+
+function makeCategoryMenuCommand(name, aliases, category, title) {
     return {
         name,
         aliases,
         category: 'core',
         desc: `${title} dikhayein`,
         handler: async (ctx) => {
+            ctx.react('⚡');
             const list = ctx.registry.getByCategory(category);
-            await ctx.reply(formatCategoryBlock(title, emoji, list, ctx.prefix));
+            await sendStyledMenu(ctx, [{ key: category, title }], list.length);
         }
     };
 }
@@ -34,71 +239,90 @@ const commands = [
         name: 'menu',
         aliases: ['help', 'm'],
         category: 'core',
-        desc: 'Main interactive bot menu aur categories',
+        desc: 'SIGMA MD interactive menu, profile aur pair links',
         handler: async (ctx) => {
-            const cfg = configStore.getConfig();
+            ctx.react('⚡');
+            const argSection = ctx.args[0] ? resolveCategorySection(ctx.args[0]) : null;
+            if (argSection) {
+                const count = ctx.registry.getByCategory(argSection.key).length;
+                return await sendStyledMenu(ctx, [argSection], count);
+            }
             const total = ctx.registry.getAllCommands().length;
-            const ownerCount = ctx.registry.getByCategory('owner').length;
-            const groupCount = ctx.registry.getByCategory('group').length;
-            const channelCount = ctx.registry.getByCategory('channel').length;
-            const dlCount = ctx.registry.getByCategory('downloader').length;
-            const toolsCount = ctx.registry.getByCategory('tools').length;
-            const coreCount = ctx.registry.getByCategory('core').length;
-            const mem = ctx.runtime.getMemoryUsageMb();
-            const up = formatUptime(ctx.runtime.getUptimeSec());
-            const p = ctx.prefix;
-
-            const text =
-                `╭━━━〔 ⚡ *${cfg.botName}* ⚡ 〕━━━┈⊷\n` +
-                `┃ 👑 *Owner:* ${cfg.ownerName}\n` +
-                `┃ 🌐 *Mode:* ${cfg.mode.toUpperCase()} | *Prefix:* \`${p}\`\n` +
-                `┃ 📊 *Total Commands:* ${total}+\n` +
-                `┃ ⏳ *Uptime:* ${up}\n` +
-                `┃ 💾 *RAM:* ${mem} MB / 512 MB\n` +
-                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-                `📂 *CATEGORY MENUS (Type to open):*\n` +
-                `• *${p}ownermenu* — Owner Commands (${ownerCount})\n` +
-                `• *${p}groupmenu* — Group Commands (${groupCount})\n` +
-                `• *${p}channelmenu* — Channel Commands (${channelCount})\n` +
-                `• *${p}dlmenu* — Downloader Menu (${dlCount})\n` +
-                `• *${p}toolsmenu* — Tools & Islamic Menu (${toolsCount})\n` +
-                `• *${p}allmenu* — All ${total} Commands List (${coreCount + ownerCount + groupCount + channelCount + dlCount + toolsCount})\n\n` +
-                `⚡ *QUICK COMMANDS:*\n` +
-                `${p}ping | ${p}alive | ${p}ram | ${p}play | ${p}video | ${p}tiktok | ${p}ig | ${p}fb | ${p}apk | ${p}vv | ${p}cforward | ${p}chfollow | ${p}chreact | ${p}tagall | ${p}hidetag | ${p}antilink | ${p}translate | ${p}qr\n\n` +
-                `> _Powered by ${cfg.botName} • Heroku 24/7 Zero-Sleep_`;
-
-            await ctx.reply(text);
+            await sendStyledMenu(ctx, CATEGORY_SECTIONS, total);
         }
     },
     {
         name: 'allmenu',
         aliases: ['list', 'commands', 'cmds'],
         category: 'core',
-        desc: 'Tamam 140+ commands ek sath dekhein',
+        desc: 'Tamam commands SIGMA MD menu style mein dekhein',
         handler: async (ctx) => {
-            const cfg = configStore.getConfig();
-            const p = ctx.prefix;
-            const listBlock = (cat, title) => {
-                const names = ctx.registry.getByCategory(cat).map((c) => `${p}${c.name}`).join(', ');
-                return `*${title} (${ctx.registry.getByCategory(cat).length}):*\n${names}`;
-            };
-            const text =
-                `⚡ *${cfg.botName} — COMPLETE DIRECTORY (${ctx.registry.getAllCommands().length} COMMANDS)*\n\n` +
-                `${listBlock('core', '🏠 MENU & CORE')}\n\n` +
-                `${listBlock('owner', '👑 OWNER')}\n\n` +
-                `${listBlock('group', '👥 GROUP')}\n\n` +
-                `${listBlock('channel', '📢 CHANNEL')}\n\n` +
-                `${listBlock('downloader', '📥 DOWNLOADER')}\n\n` +
-                `${listBlock('tools', '🛠️ TOOLS & ISLAMIC')}\n\n` +
-                `💡 _Tafseel ke liye *${p}ownermenu*, *${p}groupmenu*, *${p}channelmenu*, *${p}dlmenu*, ya *${p}toolsmenu* bhejein._`;
-            await ctx.reply(text);
+            ctx.react('⚡');
+            const total = ctx.registry.getAllCommands().length;
+            await sendStyledMenu(ctx, CATEGORY_SECTIONS, total);
         }
     },
-    makeCategoryMenuCommand('ownermenu', ['menuowner'], 'owner', 'OWNER COMMANDS', '👑'),
-    makeCategoryMenuCommand('groupmenu', ['menugroup', 'gcmenu'], 'group', 'GROUP COMMANDS', '👥'),
-    makeCategoryMenuCommand('channelmenu', ['menuchannel', 'chmenu'], 'channel', 'CHANNEL COMMANDS', '📢'),
-    makeCategoryMenuCommand('dlmenu', ['downloadermenu', 'downloadmenu'], 'downloader', 'DOWNLOADER MENU', '📥'),
-    makeCategoryMenuCommand('toolsmenu', ['menutools', 'utilitymenu'], 'tools', 'TOOLS & ISLAMIC MENU', '🛠️'),
+    {
+        name: 'profile',
+        aliases: ['owner', 'onwer', 'dev', 'developer', 'creator', 'myprofile', 'profileinfo'],
+        category: 'core',
+        desc: 'Bot profile, developer info aur Mini/Main Bot Pair links dekhein',
+        handler: async (ctx) => {
+            ctx.react('👑');
+            const cfg = configStore.getConfig();
+            const botName = cfg.botName || 'SIGMA MD';
+            const ownerName = cfg.ownerName || 'MR SAQIB';
+            const userName = String(ctx.msg?.pushName || ctx.senderDigits || 'User').replace(/[*_~`]/g, '').trim() || 'User';
+            const total = ctx.registry.getAllCommands().length;
+            const usedMem = ctx.runtime.getMemoryUsageMb();
+            const runtimeStr = formatUptime(ctx.runtime.getUptimeSec());
+            const miniPair = cfg.miniPairUrl || 'https://sigmaminibot.vercel.app';
+            const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
+
+            const profileCard =
+                `╭━━━〔 👑 ${toSansBold(`${botName} PROFILE`)} 〕━━━┈⊷\n` +
+                `┃ 🤖 ${toSansBold('Bot Name')}: ${toSansBold(botName)}\n` +
+                `┃ 👤 ${toSansBold('User')}: _${userName}_\n` +
+                `┃ 👑 ${toSansBold('Owner')}: ${toSansBold(ownerName)}\n` +
+                `┃ 💻 ${toSansBold('Developer')}: _Muhammad Saqib_\n` +
+                `┃ 🟢 ${toSansBold('Status')}: ${toSansBold('Connected & Active')}\n` +
+                `┃ 📂 ${toSansBold('Commands')}: ${toSansBold(`${total}+`)}\n` +
+                `┃ ⏳ ${toSansBold('Uptime')}: _${runtimeStr}_\n` +
+                `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / 512MB_\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+                `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
+                `┃ 🤖 *Mini Bot Pair Link:*\n` +
+                `┃ ${miniPair}\n` +
+                `┃ ⚡ *Main Bot Pair Link:*\n` +
+                `┃ ${mainPair}\n` +
+                `┃ 🌐 *Official Website:*\n` +
+                `┃ https://mrsaqib.me\n` +
+                `┃ 🔍 *Search on Google:*\n` +
+                `┃ google.com/search?q=mr+saqib\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+                `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
+
+            const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
+            const imgBuf = getMenuImageBuffer();
+            const adCtx = buildProfileAdContext(cfg, userName);
+
+            if (imgBuf) {
+                try {
+                    await Promise.race([
+                        ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: profileCard, contextInfo: buildNewsletterContext(cfg) }, replyOpts),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Profile image send timeout')), 8000))
+                    ]);
+                    return;
+                } catch (_) {}
+            }
+            await ctx.sock.sendMessage(ctx.from, { text: profileCard, contextInfo: adCtx }, replyOpts);
+        }
+    },
+    makeCategoryMenuCommand('ownermenu', ['menuowner'], 'owner', 'OWNER'),
+    makeCategoryMenuCommand('groupmenu', ['menugroup', 'gcmenu'], 'group', 'GROUP'),
+    makeCategoryMenuCommand('channelmenu', ['menuchannel', 'chmenu'], 'channel', 'CHANNEL'),
+    makeCategoryMenuCommand('dlmenu', ['downloadermenu', 'downloadmenu'], 'downloader', 'DOWNLOAD'),
+    makeCategoryMenuCommand('toolsmenu', ['menutools', 'utilitymenu'], 'tools', 'TOOLS & ISLAMIC'),
     {
         name: 'ping',
         aliases: ['speed', 'p'],
@@ -108,8 +332,9 @@ const commands = [
             const rawLatency = Date.now() - ctx.msgTime;
             const latency = rawLatency > 0 && rawLatency < 60000 ? rawLatency : 18;
             const cfg = configStore.getConfig();
+            const botName = cfg.botName || 'SIGMA MD';
             await ctx.reply(
-                `⚡ *PONG! ${cfg.botName} IS ALIVE!*\n\n` +
+                `⚡ *PONG! ${toSansBold(botName)} IS ALIVE!*\n\n` +
                 `⏱️ *Response:* ${latency} ms\n` +
                 `💾 *RAM:* ${ctx.runtime.getMemoryUsageMb()} MB / 512 MB\n` +
                 `⏳ *Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}\n` +
@@ -125,12 +350,14 @@ const commands = [
         desc: 'Bot 24/7 active status check karein',
         handler: async (ctx) => {
             const cfg = configStore.getConfig();
+            const botName = cfg.botName || 'SIGMA MD';
             await ctx.reply(
-                `🟢 *${cfg.botName} IS 100% ONLINE!*\n\n` +
+                `🟢 *${toSansBold(botName)} IS 100% ONLINE!*\n\n` +
                 `• *Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}\n` +
                 `• *RAM:* ${ctx.runtime.getMemoryUsageMb()} MB / 512 MB\n` +
                 `• *Commands Ready:* ${ctx.registry.getAllCommands().length}+\n` +
-                `• *KeepAlive:* 25s Heroku Self-Ping Engine`
+                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmaminibot.vercel.app'}\n` +
+                `• *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}`
             );
         }
     },
@@ -144,7 +371,7 @@ const commands = [
             const toMb = (b) => Math.round(b / (1024 * 1024));
             const rss = toMb(m.rss);
             await ctx.reply(
-                `📊 *HEROKU MEMORY METRICS:*\n\n` +
+                `📊 *SIGMA MD MEMORY METRICS:*\n\n` +
                 `• *RSS (Total RAM):* ${rss} MB / 512 MB\n` +
                 `• *Heap Used:* ${toMb(m.heapUsed)} MB\n` +
                 `• *Heap Total:* ${toMb(m.heapTotal)} MB\n` +
@@ -158,7 +385,7 @@ const commands = [
         category: 'core',
         desc: 'Server continuous uptime dekhein',
         handler: async (ctx) => {
-            await ctx.reply(`⏳ *Bot Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}`);
+            await ctx.reply(`⏳ *SIGMA MD Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}`);
         }
     },
     {
@@ -174,6 +401,8 @@ const commands = [
                 `• *Prefix:* \`${cfg.prefix}\`\n` +
                 `• *Mode:* ${cfg.mode.toUpperCase()}\n` +
                 `• *Commands:* ${ctx.registry.getAllCommands().length}\n` +
+                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmaminibot.vercel.app'}\n` +
+                `• *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}\n` +
                 `• *AutoRead:* ${cfg.autoread ? 'ON' : 'OFF'} | *AutoVV:* ${cfg.autovv ? 'ON' : 'OFF'}\n` +
                 `• *AntiDelete:* ${cfg.antidelete ? 'ON' : 'OFF'} | *AutoStatus:* ${cfg.autoviewStatus ? 'ON' : 'OFF'}`
             );

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Unified Command Registry & Dispatcher
+ * SIGMA MD :: Unified Command Registry & Dispatcher
  */
 
 const modules = [

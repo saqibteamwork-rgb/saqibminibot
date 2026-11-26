@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Shared Baileys v7 JID, Unwrap, Media, Channel & Security Helpers
+ * SIGMA MD :: Shared Baileys v7 JID, Unwrap, Media, Channel & Security Helpers
  */
 
 const http = require('http');

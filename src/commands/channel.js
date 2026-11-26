@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: WhatsApp Channel (@newsletter) Command Suite (16 commands)
+ * SIGMA MD :: WhatsApp Channel (@newsletter) Command Suite (16 commands)
  * Protected by strict Owner checks on mutating / channel-posting commands.
  */
 

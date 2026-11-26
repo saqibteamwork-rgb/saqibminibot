@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * MINI BOT MD :: Persistent Runtime Config & Group State Store
+ * SIGMA MD :: Persistent Runtime Config & Group State Store
  * Syncs smoothly between local JSON (data/bot_config.json) and MongoDB Atlas (if configured).
  */
 
@@ -16,13 +16,31 @@ function normalizeDigits(val) {
     return String(val).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 }
 
+function resolveBotName(rawVal) {
+    const clean = typeof rawVal === 'string' ? rawVal.trim() : '';
+    if (!clean || /^mini\s*bot(\s*md)?$/i.test(clean)) {
+        return 'SIGMA MD';
+    }
+    return clean;
+}
+
+function resolveNewsletterName(rawVal) {
+    const clean = typeof rawVal === 'string' ? rawVal.trim() : '';
+    if (!clean || /^mini\s*bot(\s*md)?$/i.test(clean) || /^mr\.?\s*saqib$/i.test(clean)) {
+        return 'SIGMA MD';
+    }
+    return clean;
+}
+
 function getDefaultConfig() {
     const envOwner = normalizeDigits(process.env.OWNER_NUMBER || '923438673242');
     return {
-        botName: process.env.BOT_NAME || 'MINI BOT MD',
+        botName: resolveBotName(process.env.BOT_NAME),
         ownerName: process.env.OWNER_NAME || 'MR SAQIB',
         newsletterJid: process.env.NEWSLETTER_JID || process.env.NEWSLETTER_ID || '120363431913895899@newsletter',
-        newsletterName: process.env.CHANNEL_NAME || 'Mr SAQIB',
+        newsletterName: resolveNewsletterName(process.env.CHANNEL_NAME),
+        miniPairUrl: process.env.MINI_PAIR_URL || 'https://sigmaminibot.vercel.app',
+        mainPairUrl: process.env.MAIN_PAIR_URL || 'https://mrsaqib.me/pair',
         channelCardEnabled: true,
         prefix: '.',
         mode: 'public', // public | private | self
@@ -56,10 +74,12 @@ function mergeWithDefaults(raw) {
     ].filter(Boolean));
 
     return {
-        botName: (typeof raw?.botName === 'string' && raw.botName.trim()) ? raw.botName.trim() : def.botName,
+        botName: resolveBotName(raw?.botName) || def.botName,
         ownerName: (typeof raw?.ownerName === 'string' && raw.ownerName.trim()) ? raw.ownerName.trim() : def.ownerName,
         newsletterJid: (typeof raw?.newsletterJid === 'string' && raw.newsletterJid.endsWith('@newsletter')) ? raw.newsletterJid.trim() : def.newsletterJid,
-        newsletterName: (typeof raw?.newsletterName === 'string' && raw.newsletterName.trim()) ? raw.newsletterName.trim() : def.newsletterName,
+        newsletterName: resolveNewsletterName(raw?.newsletterName) || def.newsletterName,
+        miniPairUrl: (typeof raw?.miniPairUrl === 'string' && /^https?:\/\//i.test(raw.miniPairUrl.trim())) ? raw.miniPairUrl.trim() : def.miniPairUrl,
+        mainPairUrl: (typeof raw?.mainPairUrl === 'string' && /^https?:\/\//i.test(raw.mainPairUrl.trim())) ? raw.mainPairUrl.trim() : def.mainPairUrl,
         channelCardEnabled: raw?.channelCardEnabled === undefined ? def.channelCardEnabled : Boolean(raw.channelCardEnabled),
         prefix: (typeof raw?.prefix === 'string' && raw.prefix.length > 0 && raw.prefix.length <= 3) ? raw.prefix : def.prefix,
         mode: ['public', 'private', 'self'].includes(raw?.mode) ? raw.mode : def.mode,

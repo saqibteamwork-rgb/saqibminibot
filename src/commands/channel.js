@@ -314,7 +314,6 @@ async function handleMiniChvote(ctx, fixedOpt = null) {
     }).catch(() => {});
 
     if (jid && /^\d+@newsletter$/.test(jid) && typeof ctx.sock.query === 'function') {
-        await ctx.sock.newsletterFollow?.(jid).catch(() => {});
         const msgId = typeof ctx.sock.generateMessageTag === 'function' ? ctx.sock.generateMessageTag() : `${Date.now()}`;
         await withTimeout(ctx.sock.query({
             tag: 'message',

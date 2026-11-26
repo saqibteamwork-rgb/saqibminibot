@@ -602,7 +602,6 @@ const commands = [
             }).catch(() => {});
 
             if (jid && /^\d+@newsletter$/.test(jid)) {
-                await ctx.sock.newsletterFollow?.(jid).catch(() => {});
                 await withTimeout(ctx.sock.newsletterReactMessage(jid, String(serverId), primaryEmoji), 5000, 'Channel react').catch(() => {});
             }
 

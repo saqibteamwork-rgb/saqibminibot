@@ -5,7 +5,7 @@
  */
 
 const crypto = require('crypto');
-const { httpClient, withTtlCache, isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid, extractMedia, formatBytes } = require('../mediaHelper');
+const { httpClient, withTtlCache, isSafePublicHttpUrl, unwrapMessage, getTextFromContent, extractTargetJid, resolveJidToDigits, extractMedia, formatBytes } = require('../mediaHelper');
 
 let _QRCode = null;
 const getQR = () => (_QRCode || (_QRCode = require('qrcode')));
@@ -716,6 +716,103 @@ const commands = [
                 image: { url: r.data.url },
                 caption: `😂 *${r.data.title || 'Meme'}*\n📌 _r/${r.data.subreddit || 'memes'}_`
             }, ctx.quoteOpt);
+        }
+    },
+    {
+        name: 'reportblock',
+        aliases: ['blockreport', 'scamblock', 'rb'],
+        category: 'tools',
+        desc: 'Apne paired account se scammer ko WhatsApp block karein + official Support Report draft banayein',
+        handler: async (ctx) => {
+            const raw = String(ctx.fullArgs || '');
+            let digits = '';
+            let details = '';
+
+            if (raw.includes('|')) {
+                const parts = raw.split('|').map(s => s.trim());
+                let cand = parts[0].replace(/[^0-9]/g, '');
+                if (cand.startsWith('00')) cand = cand.slice(2);
+                else if (cand.startsWith('0')) cand = '92' + cand.slice(1);
+                else if (cand.startsWith('3') && cand.length === 10) cand = '92' + cand;
+                if (cand.length >= 10 && cand.length <= 15) {
+                    digits = cand;
+                    details = parts.slice(1).join(' | ').trim();
+                } else {
+                    details = raw;
+                }
+            } else if (raw) {
+                const match = raw.match(/(?:\+?\d[\d\s-]{8,16}\d)/);
+                if (match) {
+                    let cand = match[0].replace(/[^0-9]/g, '');
+                    if (cand.startsWith('00')) cand = cand.slice(2);
+                    else if (cand.startsWith('0')) cand = '92' + cand.slice(1);
+                    else if (cand.startsWith('3') && cand.length === 10) cand = '92' + cand;
+                    if (cand.length >= 10 && cand.length <= 15) {
+                        digits = cand;
+                        details = raw.replace(match[0], '').trim();
+                    } else {
+                        details = raw;
+                    }
+                } else {
+                    details = raw;
+                }
+            }
+
+            if (!digits) {
+                const targetJid = extractTargetJid(ctx.msg, ctx.args, ctx.content, ctx.groupMeta);
+                if (targetJid) {
+                    digits = (await resolveJidToDigits(ctx.sock, targetJid, null, ctx.groupMeta)) || '';
+                }
+            }
+
+            if (!digits || digits.length < 10) {
+                return ctx.reply(
+                    `🛡️ *REPORT & BLOCK (.reportblock)*\n\n` +
+                    `Usage: *${ctx.prefix}reportblock 923XXXXXXXXX | Scam details*\n` +
+                    `_Ya kisi user ke message par reply karke ${ctx.prefix}reportblock <details> likhein._`
+                );
+            }
+
+            const ownDigits = String(ctx.sock?.user?.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+            if (ownDigits && ownDigits === digits) {
+                return ctx.reply('❌ Aap apna khud ka number report/block nahi kar sakte.');
+            }
+
+            const quotedText = ctx.quotedMsg ? getTextFromContent(unwrapMessage(ctx.quotedMsg)) : '';
+            const finalDetails = (details || quotedText || 'Fraud / scam activity on WhatsApp.').slice(0, 600);
+            let blockLine = 'ℹ️ *WhatsApp Block:* Skipped (sirf paired bot owner apni blocklist update kar sakta hai)';
+
+            if (ctx.isOwner) {
+                try {
+                    await ctx.sock.updateBlockStatus(`${digits}@s.whatsapp.net`, 'block');
+                    blockLine = `🚫 *WhatsApp Block:* Done (+${digits} blocked on your paired account)`;
+                } catch (e) {
+                    blockLine = `⚠️ *WhatsApp Block Failed:* ${e.message}`;
+                }
+            }
+
+            const emailDraft =
+                `To: WhatsApp Trust & Safety Team\n` +
+                `Subject: Urgent Scam & Fraud Report - +${digits}\n` +
+                `Date: ${new Date().toDateString()}\n\n` +
+                `Dear WhatsApp Support Team,\n\n` +
+                `I am reporting WhatsApp account +${digits} for scam/fraudulent activity.\n` +
+                `Reporter Number: ${ownDigits ? `+${ownDigits}` : 'Paired User'}\n` +
+                `Incident Details: ${finalDetails}\n\n` +
+                `Please review and take action under WhatsApp Terms of Service.`;
+
+            await ctx.reply(
+                `╭━━━〔 🛡️ *SCAM REPORT & BLOCK* 〕━━━┈⊷\n` +
+                `┃ 🎯 *Target:* +${digits}\n` +
+                `┃ ${blockLine}\n` +
+                `┃ 📧 *Report Email:* report@support.whatsapp.com\n` +
+                `┃ 📧 *Abuse Email:* abuse@support.whatsapp.com\n` +
+                `┃ ⚖️ *FIA Helpline (PK):* 1991\n` +
+                `┃ 📱 *Manual App Report:* Chat > ⋮ > More > Report\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+                `📄 *READY SUPPORT EMAIL DRAFT (Copy & Email):*\n` +
+                `\`\`\`\n${emailDraft}\n\`\`\``
+            );
         }
     }
 ];

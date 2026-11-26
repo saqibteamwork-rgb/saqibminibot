@@ -136,37 +136,15 @@ function buildPairLinksCard(cfg) {
 
 function buildNewsletterContext(cfg) {
     const botName = cfg.botName || 'SIGMA MD';
+    if (!cfg.channelCardEnabled || !cfg.newsletterJid) return undefined;
     return {
         forwardingScore: 999,
         isForwarded: true,
         forwardedNewsletterMessageInfo: {
-            newsletterJid: cfg.newsletterJid || '120363431913895899@newsletter',
+            newsletterJid: cfg.newsletterJid,
             newsletterName: botName,
             serverMessageId: 1
         }
-    };
-}
-
-function buildProfileAdContext(cfg, userName = 'User') {
-    const botName = cfg.botName || 'SIGMA MD';
-    const ownerName = cfg.ownerName || 'MR SAQIB';
-    const miniPair = cfg.miniPairUrl || 'https://sigmaminibot.vercel.app';
-    const imgBuf = getMenuImageBuffer();
-
-    const adReply = {
-        title: `⚡ ${botName}`,
-        body: `👤 ${userName} • 👑 ${ownerName}`,
-        mediaType: 1,
-        sourceUrl: miniPair,
-        renderLargerThumbnail: false
-    };
-    if (imgBuf) {
-        adReply.thumbnail = imgBuf;
-    }
-
-    return {
-        ...buildNewsletterContext(cfg),
-        externalAdReply: adReply
     };
 }
 
@@ -181,43 +159,25 @@ async function sendStyledMenu(ctx, sections, headerCommandCount) {
         .filter(Boolean)
         .join('\n');
     const linksCard = buildPairLinksCard(cfg);
-    const bodyWithLinks = `${boxesText.trim()}\n\n${linksCard}`.trim();
-    const fullText = `${headerText}\n\n${bodyWithLinks}`;
-    const userName = String(ctx.msg?.pushName || ctx.senderDigits || 'User').trim() || 'User';
+    const fullText = `${headerText}\n\n${boxesText.trim()}\n\n${linksCard}`.trim();
 
     const newsletterCtx = buildNewsletterContext(cfg);
-    const adCtx = buildProfileAdContext(cfg, userName);
     const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
     const imgBuf = getMenuImageBuffer();
 
-    const sendImageSafe = (captionText) => Promise.race([
-        ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: captionText, contextInfo: newsletterCtx }, replyOpts),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Menu image send timeout')), 8000))
-    ]);
+    const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
 
     if (imgBuf) {
-        if (fullText.length <= 1500) {
-            try {
-                await sendImageSafe(fullText);
-                await ctx.sock.sendMessage(ctx.from, { text: linksCard, contextInfo: adCtx });
-                return;
-            } catch (_) {
-                await ctx.sock.sendMessage(ctx.from, { text: fullText, contextInfo: adCtx }, replyOpts);
-                return;
-            }
-        }
         try {
-            await sendImageSafe(headerText);
-            await ctx.sock.sendMessage(ctx.from, { text: bodyWithLinks, contextInfo: adCtx });
+            await Promise.race([
+                ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: fullText, ...payloadBase }, replyOpts),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Menu image send timeout')), 8000))
+            ]);
             return;
-        } catch (_) {
-            await ctx.sock.sendMessage(ctx.from, { text: fullText, contextInfo: adCtx }, replyOpts);
-            return;
-        }
+        } catch (_) {}
     }
 
-    await ctx.sock.sendMessage(ctx.from, { text: headerText, contextInfo: newsletterCtx }, replyOpts);
-    await ctx.sock.sendMessage(ctx.from, { text: bodyWithLinks, contextInfo: adCtx });
+    await ctx.sock.sendMessage(ctx.from, { text: fullText, ...payloadBase }, replyOpts);
 }
 
 function makeCategoryMenuCommand(name, aliases, category, title) {
@@ -304,18 +264,19 @@ const commands = [
 
             const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
             const imgBuf = getMenuImageBuffer();
-            const adCtx = buildProfileAdContext(cfg, userName);
+            const newsletterCtx = buildNewsletterContext(cfg);
+            const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
 
             if (imgBuf) {
                 try {
                     await Promise.race([
-                        ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: profileCard, contextInfo: buildNewsletterContext(cfg) }, replyOpts),
+                        ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: profileCard, ...payloadBase }, replyOpts),
                         new Promise((_, reject) => setTimeout(() => reject(new Error('Profile image send timeout')), 8000))
                     ]);
                     return;
                 } catch (_) {}
             }
-            await ctx.sock.sendMessage(ctx.from, { text: profileCard, contextInfo: adCtx }, replyOpts);
+            await ctx.sock.sendMessage(ctx.from, { text: profileCard, ...payloadBase }, replyOpts);
         }
     },
     makeCategoryMenuCommand('ownermenu', ['menuowner'], 'owner', 'OWNER'),

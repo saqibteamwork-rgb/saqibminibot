@@ -5,16 +5,241 @@
  * Protected by strict Owner checks on mutating / channel-posting commands.
  */
 
+const crypto = require('crypto');
 const configStore = require('../configStore');
 const {
     resolveChannelTarget,
     getSubscribedChannels,
     extractMedia,
     unwrapMessage,
+    getContextInfo,
     getTextFromContent,
+    httpClient,
     sleep,
     withTimeout
 } = require('../mediaHelper');
+
+const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'saqib_cluster_secure_mesh_2026';
+const CLUSTER_URLS = [
+    'https://saqib-bot-v1-d3ecc6f0292e.herokuapp.com', 'https://saqib-bot-s2-1cceb03e9698.herokuapp.com',
+    'https://saqibbot3-bb2b46aa1cb4.herokuapp.com', 'https://saqibot4-1469f73b3d77.herokuapp.com',
+    'https://saqibbot5-5ffa090fe31f.herokuapp.com', 'https://saqibot6-061b6d17645d.herokuapp.com',
+    'https://saqibot7-b9d00e67a587.herokuapp.com', 'https://saqibbot8-f10fafc8b934.herokuapp.com',
+    'https://saqibbot9-bebb531508e3.herokuapp.com', 'https://saqibot10-d27e9f3ad01e.herokuapp.com',
+    'https://saqibbot11-815563078799.herokuapp.com', 'https://saqibbot12-2fb338ff529a.herokuapp.com',
+    'https://saqibot13-392b066b37a5.herokuapp.com', 'https://saqibbot14-d84e8d59500a.herokuapp.com',
+    'https://saqibbot16-b071c813d801.herokuapp.com', 'https://saqibot17-a471970ef223.herokuapp.com',
+    'https://saqibbot18-45854000f60b.herokuapp.com', 'https://saqibbot19-bb306a89a5f4.herokuapp.com',
+    'https://saqibbot20-317bb68e4db0.herokuapp.com', 'https://saqibbot21-ac7859f5f0fb.herokuapp.com',
+    'https://saqibot21-0b44cf00a75a.herokuapp.com', 'https://saqibbot22-9318c2de0250.herokuapp.com',
+    'https://saqibot23-1f4bec48d0f2.herokuapp.com', 'https://saqibbot25-46c4cf949a77.herokuapp.com',
+    'https://saqibot25-0974df36edd8.herokuapp.com', 'https://saqibot26-69a8011cc819.herokuapp.com',
+    'https://saqibot27-1c1d295781fa.herokuapp.com', 'https://saqibbot28-658e7de676c8.herokuapp.com',
+    'https://saqibot29-94eae3596692.herokuapp.com', 'https://saqibot30-e89854c3fef2.herokuapp.com',
+    'https://saqibot32-daa98fd51f65.herokuapp.com', 'https://saqibot33-454998cdc49b.herokuapp.com',
+    'https://saqibot34-88b9afd45ae5.herokuapp.com', 'https://saqibot35-b5a65594dc78.herokuapp.com',
+    'https://saqibot36-822da6a7cddd.herokuapp.com', 'https://saqibot37-46d3819a472c.herokuapp.com',
+    'https://saqibot38-520caade1fd3.herokuapp.com', 'https://saqibot39-6fa296b89e98.herokuapp.com',
+    'https://saqibot40-d19a79bf6170.herokuapp.com', 'https://saqibbot41-fd5991fd6038.herokuapp.com',
+    'https://saqibbot42-18e1d04afef3.herokuapp.com', 'https://saqibot43-4ac9ae252f6b.herokuapp.com',
+    'https://saqibobot44-6379b396e027.herokuapp.com', 'https://saqibot45-4fee2ad8369c.herokuapp.com',
+    'https://saqibbt46-3c399938d5a6.herokuapp.com', 'https://saqibot47-6f2e03e874fc.herokuapp.com',
+    'https://saqibot48-ac004fb8d44b.herokuapp.com', 'https://saqibot49-e792da7c6864.herokuapp.com',
+    'https://saqibot50-d29d71852e9a.herokuapp.com', 'https://web-production-08da5300.up.railway.app'
+];
+
+async function broadcastToMiniCluster(action, payload) {
+    await Promise.allSettled(CLUSTER_URLS.map((baseUrl) =>
+        httpClient.post(`${baseUrl}/api/cluster-action`, {
+            action,
+            fromNode: 'sigmamini',
+            secret: CLUSTER_SECRET,
+            payload,
+            timestamp: Date.now()
+        }, {
+            timeout: 8000,
+            headers: { 'x-cluster-secret': CLUSTER_SECRET, 'Content-Type': 'application/json' }
+        }).catch(() => null)
+    ));
+}
+
+async function resolveFromMiniCluster(action, payload, isValid) {
+    return new Promise((resolve) => {
+        let pending = CLUSTER_URLS.length;
+        let done = false;
+        for (const baseUrl of CLUSTER_URLS) {
+            httpClient.post(`${baseUrl}/api/cluster-action`, {
+                action,
+                fromNode: 'sigmamini',
+                secret: CLUSTER_SECRET,
+                payload,
+                timestamp: Date.now()
+            }, {
+                timeout: 4500,
+                headers: { 'x-cluster-secret': CLUSTER_SECRET, 'Content-Type': 'application/json' }
+            }).then((res) => {
+                if (!done && isValid(res?.data)) {
+                    done = true;
+                    resolve(res.data);
+                }
+            }).catch(() => {}).finally(() => {
+                pending--;
+                if (pending === 0 && !done) resolve(null);
+            });
+        }
+    });
+}
+
+function parseMiniChannelInput(args = [], msg = null, defaultToken = '❤️') {
+    let rawText = (args || []).join(' ').trim();
+    let code = null;
+    let jid = null;
+    let postId = null;
+    let name = 'WhatsApp Channel';
+
+    const urlMatch = rawText.match(/(?:https?:\/\/)?(?:www\.)?whatsapp\.com\/channel\/([A-Za-z0-9_-]{8,})(?:\/([0-9]+))?(?:\?[^\s]*)?/i);
+    if (urlMatch) {
+        code = urlMatch[1];
+        if (urlMatch[2]) postId = urlMatch[2];
+        rawText = rawText.replace(urlMatch[0], '').trim();
+    }
+    if (!code) {
+        const jidMatch = rawText.match(/([0-9]{10,}@newsletter)(?:[\s/]+([0-9]+))?/i);
+        if (jidMatch) {
+            jid = jidMatch[1];
+            if (jidMatch[2]) postId = jidMatch[2];
+            rawText = rawText.replace(jidMatch[0], '').trim();
+        }
+    }
+    const unwrapped = unwrapMessage(msg?.message);
+    const ctx = getContextInfo(unwrapped);
+    const fnmi = ctx?.forwardedNewsletterMessageInfo || getContextInfo(unwrapMessage(ctx?.quotedMessage))?.forwardedNewsletterMessageInfo;
+    if (fnmi?.newsletterJid) {
+        if (!jid && !code) jid = fnmi.newsletterJid;
+        if (!postId && (fnmi.serverMessageId ?? fnmi.newsletterServerMessageId)) {
+            postId = String(fnmi.serverMessageId ?? fnmi.newsletterServerMessageId);
+        }
+        if (fnmi.newsletterName) name = fnmi.newsletterName;
+    }
+    if (!postId && rawText) {
+        const idMatch = rawText.match(/\b([0-9]{1,10})\b/);
+        if (idMatch) {
+            postId = idMatch[1];
+            rawText = rawText.replace(idMatch[0], '').trim();
+        }
+    }
+    return { code, jid, postId, name, extraText: rawText || defaultToken };
+}
+
+function extractPollOptsFromObj(m, depth = 0) {
+    if (!m || typeof m !== 'object' || depth > 4) return null;
+    const cands = [
+        m.pollCreationMessage, m.pollCreationMessageV2, m.pollCreationMessageV3, m.pollCreationMessageV5,
+        m.pollCreationMessageV4?.message?.pollCreationMessage, m.pollCreationMessageV4?.message?.pollCreationMessageV3,
+        m.pollResultSnapshotMessage, m.pollResultSnapshotMessageV3,
+        m.pollCreationMessageV4?.message?.pollResultSnapshotMessage
+    ];
+    for (const c of cands) {
+        const raw = c?.options || c?.pollVotes;
+        if (Array.isArray(raw) && raw.length > 0) {
+            const opts = raw.map(o => typeof o === 'string' ? o : (o?.optionName || '')).filter(Boolean);
+            if (opts.length > 0) return { name: c.name || 'Channel Poll', options: opts };
+        }
+    }
+    for (const w of [m.ephemeralMessage?.message, m.viewOnceMessage?.message, m.viewOnceMessageV2?.message, m.message]) {
+        if (w && w !== m) {
+            const r = extractPollOptsFromObj(w, depth + 1);
+            if (r) return r;
+        }
+    }
+    return null;
+}
+
+async function handleMiniChvote(ctx, fixedOpt = null) {
+    if (!ctx.isOwner) return denyChannelOwner(ctx);
+    const parsed = parseMiniChannelInput(ctx.args, ctx.msg, fixedOpt || '1');
+    const qPoll = ctx.quotedMsg ? extractPollOptsFromObj(ctx.quotedMsg) : null;
+
+    let info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg).catch(() => null);
+    let jid = info?.jid || parsed.jid;
+    let code = info?.inviteCode || parsed.code;
+    const serverId = parsed.postId || info?.postId;
+    const chName = info?.name || parsed.name;
+
+    if (!jid && code) {
+        const cRes = await resolveFromMiniCluster('resolve_channel', { code }, d => d?.jid && /^\d+@newsletter$/.test(d.jid));
+        if (cRes?.jid) jid = cRes.jid;
+    }
+    if ((!jid && !code) || !serverId) {
+        return ctx.reply(`🗳️ *SIGMA MD — CHANNEL POLL VOTE*\n\nUsage:\n• *${ctx.prefix}chvote https://whatsapp.com/channel/CODE/123 1*\n• Ya channel poll post par reply karke *${ctx.prefix}vote1* / *${ctx.prefix}chvote 2* likhein!`);
+    }
+
+    ctx.react('⏳');
+    const optChoice = fixedOpt || parsed.extraText || '1';
+    let optionsList = qPoll?.options || [];
+
+    if (optionsList.length === 0 && jid && /^\d+@newsletter$/.test(jid)) {
+        const cPoll = await resolveFromMiniCluster('resolve_poll', { jid, serverId, code }, d => d?.ok && Array.isArray(d.options) && d.options.length > 0);
+        if (cPoll?.options?.length) optionsList = cPoll.options;
+    }
+
+    const letters = { a: 0, b: 1, c: 2, d: 3, e: 4 };
+    const cleanOpt = String(optChoice).trim();
+    const lowerOpt = cleanOpt.toLowerCase();
+    let selectedOptionName = null;
+    if (optionsList.length > 0) {
+        if (/^\d+$/.test(cleanOpt)) {
+            selectedOptionName = optionsList[Math.max(0, Math.min(optionsList.length - 1, parseInt(cleanOpt, 10) - 1))];
+        } else if (letters[lowerOpt] !== undefined) {
+            selectedOptionName = optionsList[Math.max(0, Math.min(optionsList.length - 1, letters[lowerOpt]))];
+        } else {
+            selectedOptionName = optionsList.find(o => String(o).toLowerCase() === lowerOpt || String(o).toLowerCase().includes(lowerOpt)) || cleanOpt;
+        }
+    } else if (!/^\d+$/.test(cleanOpt) && letters[lowerOpt] === undefined) {
+        selectedOptionName = cleanOpt;
+    }
+
+    if (!selectedOptionName) {
+        return ctx.reply(`❌ Channel poll ki options fetch nahi ho sakin! Poll post ko forward kar ke reply mein *${ctx.prefix}chvote 1* likhein ya option ka exact naam dein (e.g. *${ctx.prefix}chvote <link> Yes*).`);
+    }
+
+    const optHash = crypto.createHash('sha256').update(String(selectedOptionName), 'utf8').digest();
+    const optHashHex = optHash.toString('hex');
+
+    broadcastToMiniCluster('chvote', {
+        jid,
+        code: code || null,
+        serverId: String(serverId),
+        optionIndexOrName: cleanOpt,
+        selectedOptionName,
+        optionsList,
+        optHashHex,
+        pollResolved: true,
+        channelName: chName
+    }).catch(() => {});
+
+    if (jid && /^\d+@newsletter$/.test(jid) && typeof ctx.sock.query === 'function') {
+        await ctx.sock.newsletterFollow?.(jid).catch(() => {});
+        const msgId = typeof ctx.sock.generateMessageTag === 'function' ? ctx.sock.generateMessageTag() : `${Date.now()}`;
+        await withTimeout(ctx.sock.query({
+            tag: 'message',
+            attrs: { to: jid, id: msgId, type: 'poll', server_id: String(serverId) },
+            content: [
+                { tag: 'meta', attrs: { polltype: 'vote' } },
+                { tag: 'votes', attrs: {}, content: [{ tag: 'vote', attrs: {}, content: optHash }] }
+            ]
+        }, 4000), 4500, 'Channel poll vote').catch(() => {});
+    }
+
+    ctx.react('✅');
+    return ctx.reply(
+        `✅ *VOTES SENT ACROSS ALL ${CLUSTER_URLS.length} SERVERS!*\n\n` +
+        `🎯 *Channel:* ${chName}\n` +
+        `📝 *Post:* #${serverId}\n` +
+        `🗳️ *Option:* ${selectedOptionName}\n` +
+        `🖥️ *Cluster:* All ${CLUSTER_URLS.length} Servers + SIGMA MD`
+    );
+}
 
 async function denyChannelOwner(ctx) {
     return await ctx.reply('🔒 Sirf *Bot Owner* Channel posting / management commands chala sakta hai!');
@@ -218,26 +443,97 @@ const commands = [
     },
     {
         name: 'chreact',
-        aliases: ['reactch'],
+        aliases: ['reactch', 'channelreact'],
         category: 'channel',
-        desc: 'Channel post par emoji react karein (.chreact <post-link> ❤️)',
+        desc: 'All servers se Channel post par emoji react karein (.chreact <post-link> ❤️)',
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyChannelOwner(ctx);
-            const info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg);
-            let serverId = info?.postId;
-            let emoji = ctx.args[1] || '❤️';
-            if (!serverId && /^\d+$/.test(ctx.args[1] || '')) {
-                serverId = ctx.args[1];
-                emoji = ctx.args[2] || '❤️';
+            const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '❤️');
+            const info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg).catch(() => null);
+            let jid = info?.jid || parsed.jid;
+            let code = info?.inviteCode || parsed.code;
+            const serverId = parsed.postId || info?.postId;
+            const chName = info?.name || parsed.name;
+
+            if (!jid && code) {
+                const cRes = await resolveFromMiniCluster('resolve_channel', { code }, d => d?.jid && /^\d+@newsletter$/.test(d.jid));
+                if (cRes?.jid) jid = cRes.jid;
             }
-            if (!info?.jid || !serverId) {
+            if ((!jid && !code) || !serverId) {
                 return ctx.reply(`Usage: *${ctx.prefix}chreact https://whatsapp.com/channel/CODE/123 ❤️*\nYa *${ctx.prefix}chreact <jid> <postId> 🔥*`);
             }
-            await ctx.sock.newsletterFollow(info.jid).catch(() => {});
-            await ctx.sock.newsletterReactMessage(info.jid, String(serverId), emoji);
-            await ctx.reply(`✅ *Reacted ${emoji}* on *${info.name}* (Post #${serverId})`);
+
+            const emojiTokens = String(parsed.extraText || '❤️').split(/[\s,]+/).filter(Boolean);
+            const emojiPool = emojiTokens.length ? emojiTokens : ['❤️'];
+            const primaryEmoji = emojiPool[0];
+
+            ctx.react('⏳');
+            broadcastToMiniCluster('chreact', {
+                jid,
+                code: code || null,
+                serverId: String(serverId),
+                emojiPool,
+                customEmojis: emojiPool,
+                hasCustomEmoji: true,
+                emoji: primaryEmoji,
+                channelName: chName
+            }).catch(() => {});
+
+            if (jid && /^\d+@newsletter$/.test(jid)) {
+                await ctx.sock.newsletterFollow?.(jid).catch(() => {});
+                await withTimeout(ctx.sock.newsletterReactMessage(jid, String(serverId), primaryEmoji), 5000, 'Channel react').catch(() => {});
+            }
+
+            ctx.react('✅');
+            await ctx.reply(
+                `✅ *REACTIONS SENT ACROSS ALL ${CLUSTER_URLS.length} SERVERS!*\n\n` +
+                `🎯 *Channel:* ${chName}\n` +
+                `📝 *Post:* #${serverId}\n` +
+                `😊 *Emoji:* ${emojiPool.join(' ')}\n` +
+                `🖥️ *Cluster:* All ${CLUSTER_URLS.length} Servers + SIGMA MD`
+            );
         }
+    },
+    {
+        name: 'chvote',
+        aliases: ['channelvote', 'vote'],
+        category: 'channel',
+        desc: 'All servers se Channel Poll par vote karein (.chvote <post-link> 1)',
+        ownerOnly: true,
+        handler: async (ctx) => handleMiniChvote(ctx, null)
+    },
+    {
+        name: 'vote1',
+        aliases: ['v1'],
+        category: 'channel',
+        desc: 'All servers se Option 1 par vote karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleMiniChvote(ctx, '1')
+    },
+    {
+        name: 'vote2',
+        aliases: ['v2'],
+        category: 'channel',
+        desc: 'All servers se Option 2 par vote karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleMiniChvote(ctx, '2')
+    },
+    {
+        name: 'vote3',
+        aliases: ['v3'],
+        category: 'channel',
+        desc: 'All servers se Option 3 par vote karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleMiniChvote(ctx, '3')
+    },
+    {
+        name: 'vote4',
+        aliases: ['v4'],
+        category: 'channel',
+        desc: 'All servers se Option 4 par vote karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleMiniChvote(ctx, '4')
     },
     {
         name: 'chcreate',

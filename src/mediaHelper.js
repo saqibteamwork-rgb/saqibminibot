@@ -288,7 +288,7 @@ async function resolveChannelTarget(sock, targetStr, msg = null) {
             return {
                 jid: fwdInfo.newsletterJid,
                 name: fwdInfo.newsletterName || 'WhatsApp Channel',
-                postId: fwdInfo.newsletterServerMessageId ? String(fwdInfo.newsletterServerMessageId) : null
+                postId: (fwdInfo.serverMessageId ?? fwdInfo.newsletterServerMessageId) ? String(fwdInfo.serverMessageId ?? fwdInfo.newsletterServerMessageId) : null
             };
         }
         const quoted = unwrapMessage(ctx?.quotedMessage);
@@ -298,7 +298,7 @@ async function resolveChannelTarget(sock, targetStr, msg = null) {
             return {
                 jid: qFwd.newsletterJid,
                 name: qFwd.newsletterName || 'WhatsApp Channel',
-                postId: qFwd.newsletterServerMessageId ? String(qFwd.newsletterServerMessageId) : null
+                postId: (qFwd.serverMessageId ?? qFwd.newsletterServerMessageId) ? String(qFwd.serverMessageId ?? qFwd.newsletterServerMessageId) : null
             };
         }
     }

@@ -249,28 +249,6 @@ function buildMenuHeader(ctx, displayedCommands) {
     );
 }
 
-function buildPairLinksCard(cfg) {
-    const botName = cfg.botName || 'SIGMA MD';
-    const ownerName = cfg.ownerName || 'MR SAQIB';
-    const miniPair = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
-    const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
-
-    return (
-        `╭━━━〔 👑 ${toSansBold('POWERED BY')} 〕━━━┈⊷\n` +
-        `┃ ⚡ ${toSansBold(botName)}\n` +
-        `┃ 🚀 ${toSansBold(ownerName)}\n` +
-        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-        `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
-        `┃ 🤖 *Mini Bot Pair Link:*\n` +
-        `┃ ${miniPair}\n` +
-        `┃ ⚡ *Main Bot Pair Link:*\n` +
-        `┃ ${mainPair}\n` +
-        `┃ 🔍 *Search on Google:*\n` +
-        `┃ google.com/search?q=mr+saqib\n` +
-        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
-    );
-}
-
 async function sendStyledMenu(ctx, sections, headerCommandCount) {
     const cfg = configStore.getConfig();
     const headerText = buildMenuHeader(ctx, headerCommandCount);
@@ -281,8 +259,7 @@ async function sendStyledMenu(ctx, sections, headerCommandCount) {
         })
         .filter(Boolean)
         .join('\n');
-    const linksCard = buildPairLinksCard(cfg);
-    const fullText = `${headerText}\n\n${boxesText.trim()}\n\n${linksCard}`.trim();
+    const fullText = `${headerText}\n\n${boxesText.trim()}`.trim();
 
     await sendMediaOrTextCard(ctx, cfg, fullText, 'Menu');
 }
@@ -345,8 +322,6 @@ const commands = [
             const total = ctx.registry.getAllCommands().length;
             const usedMem = ctx.runtime.getMemoryUsageMb();
             const runtimeStr = formatUptime(ctx.runtime.getUptimeSec());
-            const miniPair = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
-            const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
 
             const profileCard =
                 `╭━━━〔 👑 ${toSansBold(`${botName} PROFILE`)} 〕━━━┈⊷\n` +
@@ -359,16 +334,6 @@ const commands = [
                 `┃ 📂 ${toSansBold('Commands')}: ${toSansBold(`${total}+`)}\n` +
                 `┃ ⏳ ${toSansBold('Uptime')}: _${runtimeStr}_\n` +
                 `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / 512MB_\n` +
-                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-                `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
-                `┃ 🤖 *Mini Bot Pair Link:*\n` +
-                `┃ ${miniPair}\n` +
-                `┃ ⚡ *Main Bot Pair Link:*\n` +
-                `┃ ${mainPair}\n` +
-                `┃ 🌐 *Official Website:*\n` +
-                `┃ https://mrsaqib.me\n` +
-                `┃ 🔍 *Search on Google:*\n` +
-                `┃ google.com/search?q=mr+saqib\n` +
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 
@@ -459,8 +424,6 @@ const commands = [
                 `• *Prefix:* \`${cfg.prefix}\`\n` +
                 `• *Mode:* ${cfg.mode.toUpperCase()}\n` +
                 `• *Commands:* ${ctx.registry.getAllCommands().length}\n` +
-                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmamini.vercel.app'}\n` +
-                `• *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}\n` +
                 `• *AutoRead:* ${cfg.autoread ? 'ON' : 'OFF'} | *AutoVV:* ${cfg.autovv ? 'ON' : 'OFF'}\n` +
                 `• *AntiDelete:* ${cfg.antidelete ? 'ON' : 'OFF'} | *AutoStatus:* ${cfg.autoviewStatus ? 'ON' : 'OFF'}`
             );

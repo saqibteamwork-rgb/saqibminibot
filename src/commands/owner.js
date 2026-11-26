@@ -56,8 +56,6 @@ const commands = [
             const ownerName = cfg.ownerName || 'MR SAQIB';
             const ownerDigits = getPrimaryOwnerDigits(cfg);
             const formattedPhone = formatReadablePhone(ownerDigits);
-            const miniPair = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
-            const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
             const extraOwners = Array.isArray(cfg.owners)
                 ? cfg.owners.filter((d) => d && d !== ownerDigits).slice(0, 3)
                 : [];
@@ -71,16 +69,6 @@ const commands = [
                 `┃ 📍 ${toSansBold('Location')}: _Faisalabad, Pakistan_\n` +
                 `┃ 💻 ${toSansBold('Role')}: _Cyber Security & Full-Stack Dev_\n` +
                 `┃ 🤖 ${toSansBold('Engine')}: *${botName}* · _v2.0 Zero-Sleep_\n` +
-                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-                `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
-                `┃ 🌐 *Official Website:*\n` +
-                `┃ https://mrsaqib.me\n` +
-                `┃ 🤖 *Mini Bot Pair Link:*\n` +
-                `┃ ${miniPair}\n` +
-                `┃ ⚡ *Main Bot Pair Link:*\n` +
-                `┃ ${mainPair}\n` +
-                `┃ 🔍 *Search on Google:*\n` +
-                `┃ google.com/search?q=mr+saqib\n` +
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 

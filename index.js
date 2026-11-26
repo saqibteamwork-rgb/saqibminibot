@@ -541,8 +541,6 @@ async function initWhatsApp(pairingNumber = null) {
                               `┃ 🛠️ *Commands:* ${totalCmds}+ Loaded\n` +
                               `┃ 💾 *RAM:* ${getMemoryUsageMb()} MB / 512 MB\n` +
                               `┃ ⏱️ *KeepAlive:* 25s Zero-Sleep Active\n` +
-                              `┃ 🤖 *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmamini.vercel.app'}\n` +
-                              `┃ ⚡ *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}\n` +
                               `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                               `_Type *${cfg.prefix}menu* ya *${cfg.prefix}profile* to explore!_`
                     });

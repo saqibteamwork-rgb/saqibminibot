@@ -14,6 +14,7 @@ const {
     getPrimaryOwnerDigits,
     formatReadablePhone,
     sendMediaOrTextCard,
+    sendSeparateLinksCard,
     extractTargetJid,
     resolveJidToDigits,
     httpClient
@@ -262,6 +263,7 @@ async function sendStyledMenu(ctx, sections, headerCommandCount) {
     const fullText = `${headerText}\n\n${boxesText.trim()}`.trim();
 
     await sendMediaOrTextCard(ctx, cfg, fullText, 'Menu');
+    await sendSeparateLinksCard(ctx, cfg);
 }
 
 function makeCategoryMenuCommand(name, aliases, category, title) {
@@ -338,6 +340,7 @@ const commands = [
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 
             await sendMediaOrTextCard(ctx, cfg, profileCard, 'Profile');
+            await sendSeparateLinksCard(ctx, cfg);
         }
     },
     makeCategoryMenuCommand('ownermenu', ['menuowner'], 'owner', 'OWNER'),

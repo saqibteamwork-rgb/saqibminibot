@@ -543,6 +543,48 @@ function buildNewsletterContext(cfg) {
     };
 }
 
+function resolveReplyChatJid(sock, from) {
+    const botPn = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+    const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+    let targetJid = from ? jidNormalizedUser(from) : from;
+    if (botPn && targetJid && !targetJid.endsWith('@g.us') && !targetJid.endsWith('@newsletter')) {
+        if ((botLid && areJidsSameUser(targetJid, botLid)) || areJidsSameUser(targetJid, botPn)) {
+            targetJid = botPn;
+        }
+    }
+    return { targetJid, botPn };
+}
+
+function buildPairLinksCard(cfg) {
+    const botName = cfg?.botName || 'SIGMA MD';
+    const ownerName = cfg?.ownerName || 'MR SAQIB';
+    const miniPair = cfg?.miniPairUrl || 'https://sigmamini.vercel.app';
+    const mainPair = cfg?.mainPairUrl || 'https://mrsaqib.me/pair';
+
+    return (
+        `╭━━━〔 👑 ${toSansBold('POWERED BY')} 〕━━━┈⊷\n` +
+        `┃ ⚡ ${toSansBold(botName)}\n` +
+        `┃ 🚀 ${toSansBold(ownerName)}\n` +
+        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+        `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
+        `┃ 🤖 *Mini Bot Pair Link:*\n` +
+        `┃ ${miniPair}\n` +
+        `┃ ⚡ *Main Bot Pair Link:*\n` +
+        `┃ ${mainPair}\n` +
+        `┃ 🔍 *Search on Google:*\n` +
+        `┃ google.com/search?q=mr+saqib\n` +
+        `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+    );
+}
+
+async function sendSeparateLinksCard(ctx, cfg) {
+    const linksText = buildPairLinksCard(cfg);
+    const newsletterCtx = buildNewsletterContext(cfg);
+    const { targetJid } = resolveReplyChatJid(ctx.sock, ctx.from);
+    const payload = newsletterCtx ? { text: linksText, contextInfo: newsletterCtx } : { text: linksText };
+    await ctx.sock.sendMessage(targetJid || ctx.from, payload).catch(() => {});
+}
+
 async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card') {
     const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
     const imgBuf = getMenuImageBuffer();
@@ -555,14 +597,7 @@ async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card')
             try {
                 const cachedImg = await getCachedUploadedMenuMedia(ctx.sock, imgBuf);
                 if (cachedImg) {
-                    const botPn = ctx.sock?.user?.id ? jidNormalizedUser(ctx.sock.user.id) : null;
-                    const botLid = ctx.sock?.user?.lid ? jidNormalizedUser(ctx.sock.user.lid) : null;
-                    let targetJid = ctx.from ? jidNormalizedUser(ctx.from) : ctx.from;
-                    if (botPn && targetJid && !targetJid.endsWith('@g.us') && !targetJid.endsWith('@newsletter')) {
-                        if ((botLid && areJidsSameUser(targetJid, botLid)) || areJidsSameUser(targetJid, botPn)) {
-                            targetJid = botPn;
-                        }
-                    }
+                    const { targetJid, botPn } = resolveReplyChatJid(ctx.sock, ctx.from);
                     const isSelf = Boolean(botPn && targetJid && (botPn === targetJid || areJidsSameUser(botPn, targetJid)));
                     const safeQuoted = (ctx.msg?.message && !ctx.msg.key?.fromMe && !isSelf) ? ctx.msg : undefined;
 
@@ -634,5 +669,7 @@ module.exports = {
     getPrimaryOwnerDigits,
     formatReadablePhone,
     buildNewsletterContext,
+    buildPairLinksCard,
+    sendSeparateLinksCard,
     sendMediaOrTextCard
 };

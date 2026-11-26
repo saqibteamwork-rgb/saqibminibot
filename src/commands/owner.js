@@ -19,6 +19,7 @@ const {
     getPrimaryOwnerDigits,
     formatReadablePhone,
     sendMediaOrTextCard,
+    sendSeparateLinksCard,
     setCustomMenuImageBuffer,
     resetCustomMenuImageBuffer,
     hasCustomMenuImage
@@ -73,6 +74,7 @@ const commands = [
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 
             await sendMediaOrTextCard(ctx, cfg, ownerCard, 'Owner');
+            await sendSeparateLinksCard(ctx, cfg);
 
             // Deliver native WhatsApp vCard contact so owner's number can be messaged/saved in 1 tap
             const safeOwnerDisplay = String(ownerName).replace(/[\r\n;:]+/g, ' ').trim() || 'MR SAQIB';

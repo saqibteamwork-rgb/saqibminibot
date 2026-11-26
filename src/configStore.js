@@ -32,6 +32,14 @@ function resolveNewsletterName(rawVal) {
     return clean;
 }
 
+function resolveMiniPairUrl(rawVal) {
+    const clean = typeof rawVal === 'string' ? rawVal.trim() : '';
+    if (!clean || !/^https?:\/\//i.test(clean) || /sigmaminibot\.vercel\.app/i.test(clean)) {
+        return 'https://sigmamini.vercel.app';
+    }
+    return clean;
+}
+
 function getDefaultConfig() {
     const envOwner = normalizeDigits(process.env.OWNER_NUMBER || '923438673242');
     return {
@@ -39,7 +47,7 @@ function getDefaultConfig() {
         ownerName: process.env.OWNER_NAME || 'MR SAQIB',
         newsletterJid: process.env.NEWSLETTER_JID || process.env.NEWSLETTER_ID || '120363431913895899@newsletter',
         newsletterName: resolveNewsletterName(process.env.CHANNEL_NAME),
-        miniPairUrl: process.env.MINI_PAIR_URL || 'https://sigmaminibot.vercel.app',
+        miniPairUrl: resolveMiniPairUrl(process.env.MINI_PAIR_URL),
         mainPairUrl: process.env.MAIN_PAIR_URL || 'https://mrsaqib.me/pair',
         channelCardEnabled: true,
         prefix: '.',
@@ -78,7 +86,7 @@ function mergeWithDefaults(raw) {
         ownerName: (typeof raw?.ownerName === 'string' && raw.ownerName.trim()) ? raw.ownerName.trim() : def.ownerName,
         newsletterJid: (typeof raw?.newsletterJid === 'string' && raw.newsletterJid.endsWith('@newsletter')) ? raw.newsletterJid.trim() : def.newsletterJid,
         newsletterName: resolveNewsletterName(raw?.newsletterName) || def.newsletterName,
-        miniPairUrl: (typeof raw?.miniPairUrl === 'string' && /^https?:\/\//i.test(raw.miniPairUrl.trim())) ? raw.miniPairUrl.trim() : def.miniPairUrl,
+        miniPairUrl: resolveMiniPairUrl(raw?.miniPairUrl) || def.miniPairUrl,
         mainPairUrl: (typeof raw?.mainPairUrl === 'string' && /^https?:\/\//i.test(raw.mainPairUrl.trim())) ? raw.mainPairUrl.trim() : def.mainPairUrl,
         channelCardEnabled: raw?.channelCardEnabled === undefined ? def.channelCardEnabled : Boolean(raw.channelCardEnabled),
         prefix: (typeof raw?.prefix === 'string' && raw.prefix.length > 0 && raw.prefix.length <= 3) ? raw.prefix : def.prefix,

@@ -115,7 +115,7 @@ function buildMenuHeader(ctx, displayedCommands) {
 function buildPairLinksCard(cfg) {
     const botName = cfg.botName || 'SIGMA MD';
     const ownerName = cfg.ownerName || 'MR SAQIB';
-    const miniPair = cfg.miniPairUrl || 'https://sigmaminibot.vercel.app';
+    const miniPair = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
     const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
 
     return (
@@ -236,7 +236,7 @@ const commands = [
             const total = ctx.registry.getAllCommands().length;
             const usedMem = ctx.runtime.getMemoryUsageMb();
             const runtimeStr = formatUptime(ctx.runtime.getUptimeSec());
-            const miniPair = cfg.miniPairUrl || 'https://sigmaminibot.vercel.app';
+            const miniPair = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
             const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
 
             const profileCard =
@@ -317,7 +317,7 @@ const commands = [
                 `• *Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}\n` +
                 `• *RAM:* ${ctx.runtime.getMemoryUsageMb()} MB / 512 MB\n` +
                 `• *Commands Ready:* ${ctx.registry.getAllCommands().length}+\n` +
-                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmaminibot.vercel.app'}\n` +
+                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmamini.vercel.app'}\n` +
                 `• *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}`
             );
         }
@@ -362,7 +362,7 @@ const commands = [
                 `• *Prefix:* \`${cfg.prefix}\`\n` +
                 `• *Mode:* ${cfg.mode.toUpperCase()}\n` +
                 `• *Commands:* ${ctx.registry.getAllCommands().length}\n` +
-                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmaminibot.vercel.app'}\n` +
+                `• *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmamini.vercel.app'}\n` +
                 `• *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}\n` +
                 `• *AutoRead:* ${cfg.autoread ? 'ON' : 'OFF'} | *AutoVV:* ${cfg.autovv ? 'ON' : 'OFF'}\n` +
                 `• *AntiDelete:* ${cfg.antidelete ? 'ON' : 'OFF'} | *AutoStatus:* ${cfg.autoviewStatus ? 'ON' : 'OFF'}`

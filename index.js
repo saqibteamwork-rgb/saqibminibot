@@ -510,7 +510,7 @@ async function initWhatsApp(pairingNumber = null) {
                               `┃ 🛠️ *Commands:* ${totalCmds}+ Loaded\n` +
                               `┃ 💾 *RAM:* ${getMemoryUsageMb()} MB / 512 MB\n` +
                               `┃ ⏱️ *KeepAlive:* 25s Zero-Sleep Active\n` +
-                              `┃ 🤖 *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmaminibot.vercel.app'}\n` +
+                              `┃ 🤖 *Mini Bot Pair:* ${cfg.miniPairUrl || 'https://sigmamini.vercel.app'}\n` +
                               `┃ ⚡ *Main Bot Pair:* ${cfg.mainPairUrl || 'https://mrsaqib.me/pair'}\n` +
                               `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                               `_Type *${cfg.prefix}menu* ya *${cfg.prefix}profile* to explore!_`
@@ -891,7 +891,7 @@ app.get('/', (req, res) => {
     const botNameHtml = escapeHtml(cfg.botName || 'SIGMA MD');
     const ownerNameHtml = escapeHtml(cfg.ownerName);
     const ownerNumberHtml = escapeHtml(cfg.owners[0] || '923438673242');
-    const miniPairHref = escapeHtml(cfg.miniPairUrl || 'https://sigmaminibot.vercel.app');
+    const miniPairHref = escapeHtml(cfg.miniPairUrl || 'https://sigmamini.vercel.app');
     const mainPairHref = escapeHtml(cfg.mainPairUrl || 'https://mrsaqib.me/pair');
     const totalCmds = registry.getAllCommands().length;
     const memMb = getMemoryUsageMb();

@@ -21,6 +21,6 @@ Ultra-lightweight, crash-proof WhatsApp MD Bot (**Baileys v7 + 145 Commands**) d
    - `OWNER_NUMBER`: `923438673242`
    - `OWNER_NAME`: `MR SAQIB`
    - `BOT_NAME`: `SIGMA MD`
-   - `MINI_PAIR_URL`: `https://sigmaminibot.vercel.app`
+   - `MINI_PAIR_URL`: `https://sigmamini.vercel.app`
    - `MAIN_PAIR_URL`: `https://mrsaqib.me/pair`
 4. Heroku par **Deploy Branch (`main`)** par click karein, web app open karke phone number pair karein, aur WhatsApp par `.menu` ya `.profile` bhejein!

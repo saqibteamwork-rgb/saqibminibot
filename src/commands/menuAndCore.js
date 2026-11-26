@@ -6,39 +6,15 @@
  * live user profile card, and Mini Bot + Main Bot pair links.
  */
 
-const fs = require('fs');
-const path = require('path');
 const os = require('os');
 const configStore = require('../configStore');
-const { formatUptime } = require('../mediaHelper');
-
-const MENU_IMAGE_PATH = path.join(__dirname, '..', '..', 'assets', 'sigma_menu.png');
-let PRELOADED_MENU_IMAGE = null;
-try {
-    if (fs.existsSync(MENU_IMAGE_PATH)) {
-        PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
-    }
-} catch (_) {}
-
-function getMenuImageBuffer() {
-    if (PRELOADED_MENU_IMAGE) return PRELOADED_MENU_IMAGE;
-    try {
-        if (fs.existsSync(MENU_IMAGE_PATH)) {
-            PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
-        }
-    } catch (_) {}
-    return PRELOADED_MENU_IMAGE;
-}
-
-function toSansBold(str) {
-    return String(str || '').replace(/[A-Za-z0-9]/g, (c) => {
-        const code = c.charCodeAt(0);
-        if (code >= 65 && code <= 90) return String.fromCodePoint(0x1D5D4 + code - 65);
-        if (code >= 97 && code <= 122) return String.fromCodePoint(0x1D5EE + code - 97);
-        if (code >= 48 && code <= 57) return String.fromCodePoint(0x1D7EC + code - 48);
-        return c;
-    });
-}
+const {
+    formatUptime,
+    toSansBold,
+    getPrimaryOwnerDigits,
+    formatReadablePhone,
+    sendMediaOrTextCard
+} = require('../mediaHelper');
 
 function toSansItalic(str) {
     return String(str || '').replace(/[A-Za-z]/g, (c) => {
@@ -134,20 +110,6 @@ function buildPairLinksCard(cfg) {
     );
 }
 
-function buildNewsletterContext(cfg) {
-    const botName = cfg.botName || 'SIGMA MD';
-    if (!cfg.channelCardEnabled || !cfg.newsletterJid) return undefined;
-    return {
-        forwardingScore: 999,
-        isForwarded: true,
-        forwardedNewsletterMessageInfo: {
-            newsletterJid: cfg.newsletterJid,
-            newsletterName: botName,
-            serverMessageId: 1
-        }
-    };
-}
-
 async function sendStyledMenu(ctx, sections, headerCommandCount) {
     const cfg = configStore.getConfig();
     const headerText = buildMenuHeader(ctx, headerCommandCount);
@@ -161,23 +123,7 @@ async function sendStyledMenu(ctx, sections, headerCommandCount) {
     const linksCard = buildPairLinksCard(cfg);
     const fullText = `${headerText}\n\n${boxesText.trim()}\n\n${linksCard}`.trim();
 
-    const newsletterCtx = buildNewsletterContext(cfg);
-    const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
-    const imgBuf = getMenuImageBuffer();
-
-    const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
-
-    if (imgBuf) {
-        try {
-            await Promise.race([
-                ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: fullText, ...payloadBase }, replyOpts),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Menu image send timeout')), 8000))
-            ]);
-            return;
-        } catch (_) {}
-    }
-
-    await ctx.sock.sendMessage(ctx.from, { text: fullText, ...payloadBase }, replyOpts);
+    await sendMediaOrTextCard(ctx, cfg, fullText, 'Menu');
 }
 
 function makeCategoryMenuCommand(name, aliases, category, title) {
@@ -224,7 +170,7 @@ const commands = [
     },
     {
         name: 'profile',
-        aliases: ['owner', 'onwer', 'dev', 'developer', 'creator', 'myprofile', 'profileinfo'],
+        aliases: ['myprofile', 'profileinfo'],
         category: 'core',
         desc: 'Bot profile, developer info aur Mini/Main Bot Pair links dekhein',
         handler: async (ctx) => {
@@ -232,6 +178,8 @@ const commands = [
             const cfg = configStore.getConfig();
             const botName = cfg.botName || 'SIGMA MD';
             const ownerName = cfg.ownerName || 'MR SAQIB';
+            const ownerDigits = getPrimaryOwnerDigits(cfg);
+            const formattedPhone = formatReadablePhone(ownerDigits);
             const userName = String(ctx.msg?.pushName || ctx.senderDigits || 'User').replace(/[*_~`]/g, '').trim() || 'User';
             const total = ctx.registry.getAllCommands().length;
             const usedMem = ctx.runtime.getMemoryUsageMb();
@@ -244,6 +192,7 @@ const commands = [
                 `┃ 🤖 ${toSansBold('Bot Name')}: ${toSansBold(botName)}\n` +
                 `┃ 👤 ${toSansBold('User')}: _${userName}_\n` +
                 `┃ 👑 ${toSansBold('Owner')}: ${toSansBold(ownerName)}\n` +
+                `┃ 📱 ${toSansBold('Owner Number')}: *${formattedPhone}*\n` +
                 `┃ 💻 ${toSansBold('Developer')}: _Muhammad Saqib_\n` +
                 `┃ 🟢 ${toSansBold('Status')}: ${toSansBold('Connected & Active')}\n` +
                 `┃ 📂 ${toSansBold('Commands')}: ${toSansBold(`${total}+`)}\n` +
@@ -262,21 +211,7 @@ const commands = [
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 
-            const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
-            const imgBuf = getMenuImageBuffer();
-            const newsletterCtx = buildNewsletterContext(cfg);
-            const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
-
-            if (imgBuf) {
-                try {
-                    await Promise.race([
-                        ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: profileCard, ...payloadBase }, replyOpts),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Profile image send timeout')), 8000))
-                    ]);
-                    return;
-                } catch (_) {}
-            }
-            await ctx.sock.sendMessage(ctx.from, { text: profileCard, ...payloadBase }, replyOpts);
+            await sendMediaOrTextCard(ctx, cfg, profileCard, 'Profile');
         }
     },
     makeCategoryMenuCommand('ownermenu', ['menuowner'], 'owner', 'OWNER'),

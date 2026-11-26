@@ -401,6 +401,82 @@ function formatUptime(seconds) {
     return `${m}m ${s}s`;
 }
 
+function toSansBold(str) {
+    return String(str || '').replace(/[A-Za-z0-9]/g, (c) => {
+        const code = c.charCodeAt(0);
+        if (code >= 65 && code <= 90) return String.fromCodePoint(0x1D5D4 + code - 65);
+        if (code >= 97 && code <= 122) return String.fromCodePoint(0x1D5EE + code - 97);
+        if (code >= 48 && code <= 57) return String.fromCodePoint(0x1D7EC + code - 48);
+        return c;
+    });
+}
+
+const MENU_IMAGE_PATH = require('path').join(__dirname, '..', 'assets', 'sigma_menu.png');
+let PRELOADED_MENU_IMAGE = null;
+try {
+    const fs = require('fs');
+    if (fs.existsSync(MENU_IMAGE_PATH)) {
+        PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
+    }
+} catch (_) {}
+
+function getMenuImageBuffer() {
+    if (PRELOADED_MENU_IMAGE) return PRELOADED_MENU_IMAGE;
+    try {
+        const fs = require('fs');
+        if (fs.existsSync(MENU_IMAGE_PATH)) {
+            PRELOADED_MENU_IMAGE = fs.readFileSync(MENU_IMAGE_PATH);
+        }
+    } catch (_) {}
+    return PRELOADED_MENU_IMAGE;
+}
+
+function getPrimaryOwnerDigits(cfg) {
+    const envDigits = normalizeDigits(process.env.OWNER_NUMBER || '');
+    const listDigits = Array.isArray(cfg?.owners) ? normalizeDigits(cfg.owners[0]) : '';
+    return envDigits || listDigits || '923438673242';
+}
+
+function formatReadablePhone(digits) {
+    const clean = String(digits || '').replace(/[^0-9]/g, '');
+    if (clean.length === 12 && clean.startsWith('92')) {
+        return `+${clean.slice(0, 2)} ${clean.slice(2, 5)} ${clean.slice(5)}`;
+    }
+    return clean ? `+${clean}` : '+92 343 8673242';
+}
+
+function buildNewsletterContext(cfg) {
+    const botName = cfg?.botName || 'SIGMA MD';
+    if (!cfg?.channelCardEnabled || !cfg?.newsletterJid) return undefined;
+    return {
+        forwardingScore: 999,
+        isForwarded: true,
+        forwardedNewsletterMessageInfo: {
+            newsletterJid: cfg.newsletterJid,
+            newsletterName: botName,
+            serverMessageId: 1
+        }
+    };
+}
+
+async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card') {
+    const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
+    const imgBuf = getMenuImageBuffer();
+    const newsletterCtx = buildNewsletterContext(cfg);
+    const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
+
+    if (imgBuf) {
+        try {
+            await Promise.race([
+                ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: captionText, ...payloadBase }, replyOpts),
+                new Promise((_, reject) => setTimeout(() => reject(new Error(`${timeoutLabel} image send timeout`)), 8000))
+            ]);
+            return;
+        } catch (_) {}
+    }
+    await ctx.sock.sendMessage(ctx.from, { text: captionText, ...payloadBase }, replyOpts);
+}
+
 module.exports = {
     sleep,
     withTimeout,
@@ -422,5 +498,11 @@ module.exports = {
     resolveChannelTarget,
     getSubscribedChannels,
     formatBytes,
-    formatUptime
+    formatUptime,
+    toSansBold,
+    getMenuImageBuffer,
+    getPrimaryOwnerDigits,
+    formatReadablePhone,
+    buildNewsletterContext,
+    sendMediaOrTextCard
 };

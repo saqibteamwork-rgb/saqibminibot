@@ -14,7 +14,11 @@ const {
     unwrapMessage,
     getContextInfo,
     sleep,
-    formatUptime
+    formatUptime,
+    toSansBold,
+    getPrimaryOwnerDigits,
+    formatReadablePhone,
+    sendMediaOrTextCard
 } = require('../mediaHelper');
 
 async function denyNonOwner(ctx) {
@@ -38,21 +42,66 @@ async function resolveDigitsFromArgsOrQuote(ctx) {
 const commands = [
     {
         name: 'owner',
-        aliases: ['dev', 'creator'],
+        aliases: ['onwer', 'dev', 'developer', 'creator', 'contact', 'ownerinfo'],
         category: 'owner',
-        desc: 'Bot developer aur owner contact info',
+        desc: 'Bot owner details, phone number aur WhatsApp contact card send karein',
         ownerOnly: false,
         handler: async (ctx) => {
+            ctx.react('👑');
             const cfg = configStore.getConfig();
-            const ownerNum = cfg.owners[0] || '923438673242';
-            await ctx.reply(
-                `╭━━━〔 👑 *BOT OWNER* 〕━━━┈⊷\n` +
-                `┃ 👤 *Name:* ${cfg.ownerName}\n` +
-                `┃ 📱 *WhatsApp:* wa.me/${ownerNum}\n` +
-                `┃ 🤖 *Bot:* ${cfg.botName}\n` +
-                `┃ 🌐 *Total Owners:* ${cfg.owners.length}\n` +
-                `╰━━━━━━━━━━━━━━━━━━━━━━┈⊷`
-            );
+            const botName = cfg.botName || 'SIGMA MD';
+            const ownerName = cfg.ownerName || 'MR SAQIB';
+            const ownerDigits = getPrimaryOwnerDigits(cfg);
+            const formattedPhone = formatReadablePhone(ownerDigits);
+            const miniPair = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
+            const mainPair = cfg.mainPairUrl || 'https://mrsaqib.me/pair';
+            const extraOwners = Array.isArray(cfg.owners)
+                ? cfg.owners.filter((d) => d && d !== ownerDigits).slice(0, 3)
+                : [];
+
+            const ownerCard =
+                `╭━━━〔 👑 ${toSansBold(`${ownerName} — OWNER`)} 〕━━━┈⊷\n` +
+                `┃ 👤 ${toSansBold('Name')}: _Muhammad Saqib (${ownerName})_\n` +
+                `┃ 📱 ${toSansBold('Owner Number')}: *${formattedPhone}*\n` +
+                `┃ 💬 ${toSansBold('WhatsApp')}: https://wa.me/${ownerDigits}\n` +
+                (extraOwners.length ? `┃ 🛡️ ${toSansBold('Sudo Owners')}: ${extraOwners.map((d) => `+${d}`).join(', ')}\n` : '') +
+                `┃ 📍 ${toSansBold('Location')}: _Faisalabad, Pakistan_\n` +
+                `┃ 💻 ${toSansBold('Role')}: _Cyber Security & Full-Stack Dev_\n` +
+                `┃ 🤖 ${toSansBold('Engine')}: *${botName}* · _v2.0 Zero-Sleep_\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+                `╭━━━〔 🔗 *PAIR & OFFICIAL LINKS* 〕━━━┈⊷\n` +
+                `┃ 🌐 *Official Website:*\n` +
+                `┃ https://mrsaqib.me\n` +
+                `┃ 🤖 *Mini Bot Pair Link:*\n` +
+                `┃ ${miniPair}\n` +
+                `┃ ⚡ *Main Bot Pair Link:*\n` +
+                `┃ ${mainPair}\n` +
+                `┃ 🔍 *Search on Google:*\n` +
+                `┃ google.com/search?q=mr+saqib\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+                `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
+
+            await sendMediaOrTextCard(ctx, cfg, ownerCard, 'Owner');
+
+            // Deliver native WhatsApp vCard contact so owner's number can be messaged/saved in 1 tap
+            const safeOwnerDisplay = String(ownerName).replace(/[\r\n;:]+/g, ' ').trim() || 'MR SAQIB';
+            const safeBotDisplay = String(botName).replace(/[\r\n;:]+/g, ' ').trim() || 'SIGMA MD';
+            const vcard =
+                `BEGIN:VCARD\n` +
+                `VERSION:3.0\n` +
+                `FN:${safeOwnerDisplay}\n` +
+                `ORG:${safeBotDisplay};\n` +
+                `TEL;type=CELL;type=VOICE;waid=${ownerDigits}:+${ownerDigits}\n` +
+                `END:VCARD`;
+
+            const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
+            try {
+                await ctx.sock.sendMessage(
+                    ctx.from,
+                    { contacts: { displayName: safeOwnerDisplay, contacts: [{ vcard }] } },
+                    replyOpts
+                );
+            } catch (_) {}
         }
     },
     {

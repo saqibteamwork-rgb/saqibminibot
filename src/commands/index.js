@@ -10,7 +10,8 @@ const modules = [
     ...require('./group'),
     ...require('./channel'),
     ...require('./downloader'),
-    ...require('./tools')
+    ...require('./tools'),
+    ...require('./soundSticker')
 ];
 
 const commandMap = new Map();

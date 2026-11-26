@@ -86,6 +86,7 @@ function unwrapMessage(msgObj) {
         if (cur.deviceSentMessage?.message) { cur = cur.deviceSentMessage.message; continue; }
         if (cur.documentWithCaptionMessage?.message) { cur = cur.documentWithCaptionMessage.message; continue; }
         if (cur.editedMessage?.message) { cur = cur.editedMessage.message; continue; }
+        if (cur.audioStickerMessage?.message) { cur = cur.audioStickerMessage.message; continue; }
         break;
     }
     return cur || null;

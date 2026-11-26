@@ -35,6 +35,8 @@ const {
 } = require('@whiskeysockets/baileys');
 
 const configStore = require('./src/configStore');
+const { installSoundStickerProtoPatch } = require('./src/soundStickerProto');
+installSoundStickerProtoPatch();
 const registry = require('./src/commands');
 const {
     httpClient,

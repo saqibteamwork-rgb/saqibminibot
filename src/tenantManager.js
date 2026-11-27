@@ -18,7 +18,7 @@ const configStore = require('./configStore');
 const { httpClient, isSafePublicHttpUrl } = require('./mediaHelper');
 
 const TENANT_STATE_FILE = path.join(__dirname, '..', 'data', 'tenant_sessions.json');
-const PORTAL_URL = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || '').trim().replace(/\/+$/, '');
+const PORTAL_URL = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || 'https://sigmamini.vercel.app').trim().replace(/\/+$/, '');
 const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim().replace(/\/+$/, '');
 const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'saqib_cluster_secure_mesh_2026';

@@ -61,7 +61,7 @@ const PORT = process.env.PORT || 3000;
 const SESSIONS_ROOT = path.join(__dirname, 'sessions');
 const LEGACY_SESSION_DIR = path.join(__dirname, 'session');
 const MONGODB_URI = (process.env.MONGODB_URI || '').trim();
-const PORTAL_URL = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || 'https://minibot.site').trim().replace(/\/+$/, '');
+const PORTAL_URL = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || 'https://sigmamini.vercel.app').trim().replace(/\/+$/, '');
 const BOOT_TIME = Date.now();
 
 fs.ensureDirSync(SESSIONS_ROOT);

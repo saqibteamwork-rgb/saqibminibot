@@ -43,7 +43,8 @@ function isPlatformMaster(ctx) {
 
 async function denyTenantGlobalEdit(ctx) {
     const u = ctx.tenantConfig?.username;
-    const panelHint = u ? `\n🌐 Admin Panel: https://minibot.site/admin${u}` : '';
+    const basePortal = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || 'https://sigmamini.vercel.app').trim().replace(/\/+$/, '');
+    const panelHint = u ? `\n🌐 Admin Panel: ${basePortal}/admin${u}` : '';
     return await ctx.reply(`🔒 *Hosted Bot Guard:* Apna Bot Name, DP ya Channel change karne ke liye Web Admin Dashboard use karein.${panelHint}`);
 }
 

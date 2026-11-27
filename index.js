@@ -114,6 +114,8 @@ class BoundedSignalCache {
 // Multi-Session Registry (phone -> sessionState)
 const sessions = new Map();
 const pairLocks = new Map();
+let isServerShuttingDown = false;
+let startupRestoreInProgress = true;
 
 let cachedBaileysVersion = Array.isArray(DEFAULT_CONNECTION_CONFIG?.version) ? DEFAULT_CONNECTION_CONFIG.version : [2, 3000, 1043857760];
 let versionRefreshStarted = false;
@@ -321,8 +323,13 @@ function getSessionDocId(sessionKey) {
     return sessionKey === 'primary' ? 'primary_session' : `sess_${sessionKey}`;
 }
 
-async function executeSessionCloudBackup(session) {
-    if (!MONGODB_URI || !session || session.backupInFlight) return false;
+async function executeSessionCloudBackup(session, forceWait = false) {
+    if (!MONGODB_URI || !session) return false;
+    if (session.backupInFlight) {
+        if (!forceWait) return false;
+        for (let i = 0; i < 6 && session.backupInFlight; i++) await sleep(250);
+        if (session.backupInFlight) return false;
+    }
     session.backupInFlight = true;
     try {
         const credsFile = path.join(session.authDir, 'creds.json');
@@ -385,11 +392,27 @@ async function executeSessionCloudBackup(session) {
 }
 
 function scheduleSessionBackup(session) {
-    if (!MONGODB_URI || !session) return;
+    if (!MONGODB_URI || !session || isServerShuttingDown) return;
     if (session.backupDebounceTimer) clearTimeout(session.backupDebounceTimer);
     session.backupDebounceTimer = setTimeout(() => {
-        executeSessionCloudBackup(session).catch(() => {});
-    }, 20000);
+        session.backupDebounceTimer = null;
+        if (!isServerShuttingDown) executeSessionCloudBackup(session).catch(() => {});
+    }, 6000);
+}
+
+async function backupAllValidSessionsToMongo(forceWait = false) {
+    if (!MONGODB_URI || sessions.size === 0) return 0;
+    const tasks = [];
+    for (const s of sessions.values()) {
+        if (!s?.authDir) continue;
+        if (s.backupDebounceTimer) {
+            clearTimeout(s.backupDebounceTimer);
+            s.backupDebounceTimer = null;
+        }
+        tasks.push(executeSessionCloudBackup(s, forceWait).catch(() => false));
+    }
+    const results = await Promise.allSettled(tasks);
+    return results.filter((r) => r.status === 'fulfilled' && r.value).length;
 }
 
 async function restoreAllSessionsFromCloud() {
@@ -753,6 +776,7 @@ async function handleIncomingForSession(session, msg) {
 async function initSession(sessionKey, pairingNumber = null, opts = {}) {
     const cleanKey = configStore.normalizeDigits(sessionKey) || String(sessionKey || 'primary').trim();
     const isFreshPairing = Boolean(pairingNumber || opts.isFreshPairing);
+    if (isServerShuttingDown && !isFreshPairing) return null;
 
     let session = sessions.get(cleanKey);
     if (session?.isConnecting) {
@@ -772,6 +796,8 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
             connectStartedAt: 0,
             reconnectTimer: null,
             consecutive401Count: 0,
+            consecutive403Count: 0,
+            hasTriedCloudRecovery: false,
             currentPairingCode: null,
             cachedBotPn: null,
             cachedBotLid: null,
@@ -782,8 +808,16 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
             lastBackupHash: ''
         };
         sessions.set(cleanKey, session);
-    } else if (isFreshPairing) {
-        session.isFreshPairing = true;
+    } else {
+        if (session.reconnectTimer) {
+            clearTimeout(session.reconnectTimer);
+            session.reconnectTimer = null;
+        }
+        if (isFreshPairing) {
+            session.isFreshPairing = true;
+            session.consecutive401Count = 0;
+            session.consecutive403Count = 0;
+        }
     }
 
     session.isConnecting = true;
@@ -953,31 +987,78 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
 
                 console.log(`⚠️ [Session ${session.id} Closed] Status: ${statusCode || 'unknown'}`);
 
+                if (isServerShuttingDown) {
+                    console.log(`🛑 [Shutdown Guard ${session.id}] Deploy/restart in progress — reconnect suppressed.`);
+                    return;
+                }
+
+                // 1. Deploy / rolling-restart conflict (440): stand down 45s so new dyno keeps WhatsApp socket cleanly
+                const isReplaced = statusCode === DisconnectReason.connectionReplaced || statusCode === 440;
+                if (isReplaced) {
+                    console.warn(`⚠️ [Replaced 440 ${session.id}] Standing down 45s to avoid deploy socket storm...`);
+                    if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
+                    session.reconnectTimer = setTimeout(() => {
+                        session.reconnectTimer = null;
+                        if (!isServerShuttingDown && !session.isConnected && fs.existsSync(path.join(session.authDir, 'creds.json'))) {
+                            initSession(session.id).catch(() => {});
+                        }
+                    }, 45000);
+                    return;
+                }
+
+                const isOwnerSession = tenantManager.isMasterOwner(session.id);
+
+                // 2. Code 403 Forbidden: cautious retry shield before assuming permanently unlinked
                 const isForbidden = statusCode === 403 || statusCode === DisconnectReason.forbidden;
                 if (isForbidden) {
+                    session.consecutive403Count = (session.consecutive403Count || 0) + 1;
+                    if ((session.consecutive403Count <= 2 || isOwnerSession) && fs.existsSync(path.join(session.authDir, 'creds.json'))) {
+                        const waitMs = isOwnerSession ? 30000 : session.consecutive403Count * 15000;
+                        console.warn(`🛡️ [403 Shield ${session.id}] Retry #${session.consecutive403Count}/2 in ${waitMs / 1000}s...`);
+                        session.reconnectTimer = setTimeout(() => {
+                            session.reconnectTimer = null;
+                            if (!isServerShuttingDown && !session.isConnected) initSession(session.id).catch(() => {});
+                        }, waitMs);
+                        return;
+                    }
                     console.log(`🔴 [Forbidden ${session.id}] WhatsApp rejected session (403). Cleaning up...`);
                     await destroySessionCompletely(session.id);
                     return;
                 }
 
+                // 3. Code 401 LoggedOut: retry up to 3 times + cloud backup check before cleanup
                 if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                    session.consecutive401Count++;
-                    if (session.consecutive401Count < 3 && fs.existsSync(path.join(session.authDir, 'creds.json'))) {
-                        console.warn(`🛡️ [401 Shield ${session.id}] Transient #${session.consecutive401Count}/3 — retrying...`);
-                        session.reconnectTimer = setTimeout(() => initSession(session.id).catch(() => {}), session.consecutive401Count * 5000);
+                    session.consecutive401Count = (session.consecutive401Count || 0) + 1;
+                    if (!session.hasTriedCloudRecovery && MONGODB_URI) {
+                        session.hasTriedCloudRecovery = true;
+                        await restoreAllSessionsFromCloud().catch(() => {});
+                    }
+                    if ((session.consecutive401Count <= 3 || isOwnerSession) && fs.existsSync(path.join(session.authDir, 'creds.json'))) {
+                        const backoffMs = isOwnerSession ? 30000 : session.consecutive401Count * 8000;
+                        console.warn(`🛡️ [401 Shield ${session.id}] Transient #${session.consecutive401Count}/3 — retrying in ${backoffMs / 1000}s...`);
+                        session.reconnectTimer = setTimeout(() => {
+                            session.reconnectTimer = null;
+                            if (!isServerShuttingDown && !session.isConnected) initSession(session.id).catch(() => {});
+                        }, backoffMs);
                         return;
                     }
                     console.log(`🔴 [LoggedOut ${session.id}] Session revoked. Cleaning up...`);
                     await destroySessionCompletely(session.id);
                 } else {
                     session.consecutive401Count = 0;
-                    const waitMs = statusCode === DisconnectReason.restartRequired ? 1500 : 5000;
-                    session.reconnectTimer = setTimeout(() => initSession(session.id).catch(() => {}), waitMs);
+                    session.consecutive403Count = 0;
+                    const waitMs = (statusCode === DisconnectReason.restartRequired || statusCode === 515) ? 600 : (statusCode === 428 ? 1500 : 4000);
+                    session.reconnectTimer = setTimeout(() => {
+                        session.reconnectTimer = null;
+                        if (!isServerShuttingDown && !session.isConnected) initSession(session.id).catch(() => {});
+                    }, waitMs);
                 }
             } else if (connection === 'open') {
                 session.isConnected = true;
                 session.isConnecting = false;
                 session.consecutive401Count = 0;
+                session.consecutive403Count = 0;
+                session.hasTriedCloudRecovery = false;
                 session.currentPairingCode = null;
 
                 session.cachedBotPn = jidNormalizedUser(sock.user.id);
@@ -1011,9 +1092,10 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
 
                 console.log(`🟢 [CONNECTED ${session.id}] ${sessionCfg.botName} ONLINE (${getConnectedCount()}/${tenantManager.MAX_SESSIONS} active | RAM ${getMemoryUsageMb()}MB)`);
 
-                // Send startup confirmation cleanly
-                try {
-                    await sock.sendMessage(botJid, {
+                // Send startup confirmation cleanly after prekey sync settles (1.5s)
+                setTimeout(() => {
+                    if (!session.isConnected || isServerShuttingDown) return;
+                    sock.sendMessage(botJid, {
                         text: `╭━━━〔 ⚡ *${sessionCfg.botName} ONLINE* ⚡ 〕━━━┈⊷\n` +
                               `┃ 🟢 *Status:* Connected (Baileys v7)\n` +
                               `┃ 👑 *Owner:* ${sessionCfg.ownerName}\n` +
@@ -1022,8 +1104,8 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                               `┃ 🌐 *Slots Active:* ${getConnectedCount()} / ${tenantManager.MAX_SESSIONS}\n` +
                               `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                               `_Type *${sessionCfg.prefix}menu* ya *${sessionCfg.prefix}profile* to explore!_`
-                    });
-                } catch (_) {}
+                    }).catch(() => {});
+                }, 1500);
 
                 // Notify Portal STRICTLY on real WhatsApp connection === 'open' (referral & active slot sync)
                 tenantManager.notifyPortalReferralVerified({
@@ -1034,7 +1116,10 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                     creatorId: meta?.creatorId || null
                 }).catch(() => {});
 
-                scheduleSessionBackup(session);
+                // Flush session + tenantMeta snapshot immediately to MongoDB after connect
+                setTimeout(() => {
+                    if (!isServerShuttingDown) executeSessionCloudBackup(session).catch(() => {});
+                }, 2500);
 
                 // Warm menu art for primary or small pools
                 if (getConnectedCount() <= 8) {
@@ -1182,6 +1267,9 @@ setInterval(() => {
     trimCaches();
     if (typeof global.gc === 'function') global.gc();
 }, 180 * 1000).unref?.();
+setInterval(() => {
+    if (!isServerShuttingDown) backupAllValidSessionsToMongo(false).catch(() => {});
+}, 15 * 60 * 1000).unref?.();
 
 // ═════════════════════════════════════════════════════════════
 // 4. EXPRESS WEB DASHBOARD, CLUSTER MESH & TENANT PAIR API
@@ -1325,14 +1413,16 @@ app.post('/internal/check-sessions', (req, res) => {
         const clean = configStore.normalizeDigits(p);
         if (!clean) continue;
         const s = sessions.get(clean);
+        const hasCreds = fs.existsSync(path.join(SESSIONS_ROOT, clean, 'creds.json'));
         statuses[clean] = {
-            alive: Boolean(s && (s.isConnected || s.isConnecting)),
+            alive: Boolean((s && (s.isConnected || s.isConnecting)) || (startupRestoreInProgress && hasCreds)),
             isConnected: Boolean(s?.isConnected),
             isConnecting: Boolean(s?.isConnecting)
         };
     }
     return res.json({
         success: true,
+        booting: startupRestoreInProgress,
         workerId: tenantManager.getWorkerId(),
         statuses
     });
@@ -1669,35 +1759,79 @@ app.listen(PORT, async () => {
     console.log(`💾 Initial RAM: ${getMemoryUsageMb()} MB / 512 MB`);
     console.log(`======================================================\n`);
 
-    await migrateLegacyPrimaryDirIfNeeded();
-    await initMongo().then((db) => db && configStore.loadConfig(db)).catch(() => {});
-    await restoreAllSessionsFromCloud();
-
-    const entries = await fs.readdir(SESSIONS_ROOT).catch(() => []);
-    const masterSet = new Set(configStore.getConfig().owners || []);
-    const validKeys = [];
-    for (const dirName of entries) {
-        const credsPath = path.join(SESSIONS_ROOT, dirName, 'creds.json');
-        if (!fs.existsSync(credsPath)) continue;
-        const raw = await fs.readFile(credsPath, 'utf8').catch(() => '');
-        if (isRegisteredCredsJson(raw)) validKeys.push(dirName);
-    }
-
-    // Boot master owner sessions first, staggered cleanly by 450ms to keep RSS flat
-    validKeys.sort((a, b) => (masterSet.has(a) === masterSet.has(b) ? a.localeCompare(b) : (masterSet.has(a) ? -1 : 1)));
-    let booted = 0;
-    for (const key of validKeys.slice(0, tenantManager.MAX_SESSIONS)) {
-        if (getMemoryUsageMb() >= tenantManager.RAM_SOFT_LIMIT_MB) {
-            console.warn(`⚠️ [RAM Guard] Stopping boot restore at ${booted} sessions (${getMemoryUsageMb()}MB).`);
-            break;
+    try {
+        // Give old dyno 3.5s on Heroku deploy to run its SIGTERM flush & release sockets cleanly (prevents Code 440 wars!)
+        if (process.env.DYNO) {
+            console.log('⏳ [Boot Handoff] Waiting 3.5s for previous dyno shutdown flush before connecting...');
+            await sleep(3500);
         }
-        if (booted > 0) await sleep(450);
-        booted++;
-        initSession(key, null, { isFreshPairing: false }).catch((err) => {
-            console.error(`❌ [Auto-Connect ${key}]:`, err.message);
-        });
-    }
-    if (booted === 0) {
-        console.log('ℹ️ [Auth] No registered sessions yet. Ready to accept pairs.');
+        if (isServerShuttingDown) return;
+
+        await migrateLegacyPrimaryDirIfNeeded();
+        await initMongo().then((db) => db && configStore.loadConfig(db)).catch(() => {});
+        await restoreAllSessionsFromCloud();
+
+        const entries = await fs.readdir(SESSIONS_ROOT).catch(() => []);
+        const masterSet = new Set(configStore.getConfig().owners || []);
+        const validKeys = [];
+        for (const dirName of entries) {
+            const credsPath = path.join(SESSIONS_ROOT, dirName, 'creds.json');
+            if (!fs.existsSync(credsPath)) continue;
+            const raw = await fs.readFile(credsPath, 'utf8').catch(() => '');
+            if (isRegisteredCredsJson(raw)) validKeys.push(dirName);
+        }
+
+        // Boot master owner sessions first, staggered cleanly by 450ms to keep RSS flat
+        validKeys.sort((a, b) => (masterSet.has(a) === masterSet.has(b) ? a.localeCompare(b) : (masterSet.has(a) ? -1 : 1)));
+        let booted = 0;
+        for (const key of validKeys.slice(0, tenantManager.MAX_SESSIONS)) {
+            if (isServerShuttingDown) break;
+            if (getMemoryUsageMb() >= tenantManager.RAM_SOFT_LIMIT_MB) {
+                console.warn(`⚠️ [RAM Guard] Stopping boot restore at ${booted} sessions (${getMemoryUsageMb()}MB).`);
+                break;
+            }
+            if (booted > 0) await sleep(450);
+            booted++;
+            initSession(key, null, { isFreshPairing: false }).catch((err) => {
+                console.error(`❌ [Auto-Connect ${key}]:`, err.message);
+            });
+        }
+        if (booted === 0) {
+            console.log('ℹ️ [Auth] No registered sessions yet. Ready to accept pairs.');
+        }
+    } finally {
+        startupRestoreInProgress = false;
     }
 });
+
+// Graceful Shutdown Handler (Zero Session Loss on Heroku Updates & 24h Dyno Restarts)
+async function handleGracefulShutdown(signal) {
+    if (isServerShuttingDown) return;
+    isServerShuttingDown = true;
+    console.log(`\n🛑 [Shutdown] ${signal} received — flushing sessions & closing sockets cleanly...`);
+    const forceExitTimer = setTimeout(() => process.exit(0), 10000);
+    forceExitTimer.unref?.();
+
+    try {
+        for (const s of sessions.values()) {
+            if (s?.reconnectTimer) {
+                clearTimeout(s.reconnectTimer);
+                s.reconnectTimer = null;
+            }
+        }
+        await Promise.allSettled([
+            configStore.saveConfig ? configStore.saveConfig(mongoDb).catch(() => {}) : Promise.resolve(),
+            backupAllValidSessionsToMongo(true)
+        ]);
+        for (const s of sessions.values()) {
+            cleanupSessionSocket(s);
+        }
+        console.log('✅ [Shutdown] All sessions synced to MongoDB & sockets closed.');
+    } catch (e) {
+        console.error('⚠️ [Shutdown Error]:', e?.message || e);
+    }
+    process.exit(0);
+}
+
+process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));

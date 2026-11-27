@@ -199,6 +199,85 @@ async function resolveFromClusters(action, payload, isValid) {
     });
 }
 
+const resolvedChannelCache = new Map();
+
+/**
+ * Resolves a WhatsApp channel invite code via local open sockets first,
+ * falling back across the active Main Bot 49-server cluster even when Mini Bot has 0 paired numbers.
+ */
+async function resolveChannelViaMainMesh(code, localSocks = []) {
+    const cleanCode = String(code || '').trim().replace(/^.*whatsapp\.com\/channel\//i, '').split(/[/?#\s]/)[0];
+    if (!cleanCode) return null;
+
+    const cached = resolvedChannelCache.get(cleanCode);
+    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
+        return cached.data;
+    }
+
+    const activeSocks = (Array.isArray(localSocks) ? localSocks : [localSocks])
+        .filter((s) => s && s.user && typeof s.newsletterMetadata === 'function');
+    for (const s of activeSocks.slice(0, 3)) {
+        try {
+            const meta = await withTimeout(s.newsletterMetadata('invite', cleanCode), 4500, 'Resolve channel');
+            if (meta?.id && /^\d+@newsletter$/.test(meta.id)) {
+                const out = {
+                    ok: true,
+                    jid: meta.id,
+                    name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel',
+                    subscribers: meta.thread_metadata?.subscribers_count ?? meta.subscribers ?? null,
+                    inviteCode: cleanCode,
+                    source: 'mini_local'
+                };
+                if (resolvedChannelCache.size > 300) resolvedChannelCache.clear();
+                resolvedChannelCache.set(cleanCode, { ts: Date.now(), data: out });
+                return out;
+            }
+        } catch (_) {}
+    }
+
+    // Parallel race across live Main Bot servers (with noRelay flag to prevent ping-pong loops)
+    const mainRes = await new Promise((resolve) => {
+        const targets = MAIN_BOT_URLS.filter((u) => !u.includes('railway'));
+        let pending = targets.length;
+        let done = false;
+        if (!pending) return resolve(null);
+        for (const baseUrl of targets) {
+            httpClient.post(`${baseUrl}/api/cluster-action`, {
+                action: 'resolve_channel',
+                fromNode: getSelfUrl() || 'sigmamini',
+                secret: CLUSTER_SECRET,
+                payload: { code: cleanCode, noRelay: true },
+                timestamp: Date.now()
+            }, {
+                timeout: 5500,
+                headers: { 'x-cluster-secret': CLUSTER_SECRET, 'Content-Type': 'application/json' }
+            }).then((res) => {
+                const d = res?.data?.jid ? res.data : (res?.data?.data?.jid ? res.data.data : null);
+                if (!done && d?.jid && /^\d+@newsletter$/.test(d.jid)) {
+                    done = true;
+                    resolve({
+                        ok: true,
+                        jid: d.jid,
+                        name: d.name || 'WhatsApp Channel',
+                        subscribers: d.subscribers ?? null,
+                        inviteCode: cleanCode,
+                        source: `main_bot_relay:${baseUrl.replace(/^https?:\/\//i, '').split('.')[0]}`
+                    });
+                }
+            }).catch(() => {}).finally(() => {
+                pending--;
+                if (pending === 0 && !done) resolve(null);
+            });
+        }
+    });
+
+    if (mainRes?.jid) {
+        if (resolvedChannelCache.size > 300) resolvedChannelCache.clear();
+        resolvedChannelCache.set(cleanCode, { ts: Date.now(), data: mainRes });
+    }
+    return mainRes;
+}
+
 async function pickHealthyMainBotNode() {
     const sample = MAIN_BOT_URLS.slice(0, 8);
     const probes = await Promise.all(sample.map(async (url) => {
@@ -478,6 +557,10 @@ async function handleIncomingClusterAction(body, runtime = {}) {
                     }
                 } catch (_) {}
             }
+            if (!payload?.noRelay && !body?.noRelay) {
+                const relayed = await resolveChannelViaMainMesh(payload.code, []);
+                if (relayed?.jid) return relayed;
+            }
             return { ok: false };
         }
 
@@ -503,6 +586,7 @@ module.exports = {
     getAllMeshTargets,
     broadcastToAllClusters,
     resolveFromClusters,
+    resolveChannelViaMainMesh,
     pickHealthyMainBotNode,
     pickAvailableMiniBotNode,
     executeMiniArcReaction,

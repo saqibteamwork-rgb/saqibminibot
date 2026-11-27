@@ -1238,6 +1238,56 @@ app.post('/internal/refresh-tenant', async (req, res) => {
     return res.json({ success: true, updated: Boolean(updated) });
 });
 
+// Cross-cluster Channel / Newsletter Resolver (uses local open sockets OR live Main Bot cluster even if Mini Bot has 0 paired users)
+app.all('/api/resolve-channel', async (req, res) => {
+    try {
+        const rawInput = (
+            req.query?.url || req.query?.link || req.query?.code || req.query?.channel ||
+            req.body?.url || req.body?.link || req.body?.code || req.body?.channel || ''
+        ).toString().trim();
+        if (!rawInput) {
+            return res.status(400).json({ success: false, ok: false, error: 'Channel link or invite code required.' });
+        }
+
+        const jidMatch = rawInput.match(/([0-9]{10,}@newsletter)/i);
+        let result = null;
+        if (jidMatch) {
+            result = { ok: true, jid: jidMatch[1], name: 'WhatsApp Channel', source: 'direct_jid' };
+        } else {
+            const codeMatch = rawInput.match(/whatsapp\.com\/channel\/([A-Za-z0-9_-]{8,})/i);
+            const code = codeMatch ? codeMatch[1] : rawInput.replace(/[^A-Za-z0-9_-]/g, '');
+            result = await clusterMesh.resolveChannelViaMainMesh(code, getOpenSockets());
+        }
+
+        if (!result?.jid) {
+            return res.status(404).json({ success: false, ok: false, error: 'Could not resolve channel across Mini or Main cluster.' });
+        }
+
+        const wantsPush = req.query?.push === 'true' || req.body?.push === true;
+        let pushedToMini = false;
+        if (wantsPush && verifyClusterRequest(req)) {
+            configStore.updateConfig({
+                newsletterJid: result.jid,
+                newsletterName: result.name || 'WhatsApp Channel',
+                channelCardEnabled: true
+            });
+            pushedToMini = true;
+        }
+
+        return res.json({
+            success: true,
+            ok: true,
+            jid: result.jid,
+            name: result.name || 'WhatsApp Channel',
+            subscribers: result.subscribers ?? null,
+            source: result.source || 'cluster',
+            pushedToMini
+        });
+    } catch (e) {
+        return res.status(500).json({ success: false, ok: false, error: e.message || 'Channel resolve failed' });
+    }
+});
+
 app.get('/menu-preview', (req, res) => {
     const imgBuf = getMenuImageBuffer();
     if (!imgBuf) return res.status(404).end();

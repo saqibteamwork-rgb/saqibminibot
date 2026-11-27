@@ -277,8 +277,6 @@ function isSafePublicHttpUrl(urlStr) {
 }
 
 async function resolveChannelTarget(sock, targetStr, msg = null) {
-    if (!sock) return null;
-
     // 1. Check forwarded newsletter context from current/quoted message
     if (msg) {
         const unwrapped = unwrapMessage(msg.message);
@@ -311,22 +309,41 @@ async function resolveChannelTarget(sock, targetStr, msg = null) {
     if (linkMatch) {
         const code = linkMatch[1];
         const postId = linkMatch[2] || null;
+        if (sock && typeof sock.newsletterMetadata === 'function') {
+            try {
+                const meta = await withTimeout(sock.newsletterMetadata('invite', code), 8000, 'Channel lookup');
+                if (meta?.id) {
+                    return {
+                        jid: meta.id,
+                        name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel',
+                        followers: meta.thread_metadata?.subscribers_count ?? meta.subscribers ?? null,
+                        description: meta.thread_metadata?.description?.text || '',
+                        role: meta.viewer_metadata?.role || null,
+                        inviteCode: code,
+                        postId
+                    };
+                }
+            } catch (_) {}
+        }
+
+        // Fallback cleanly to active Main Bot cluster nodes (even when Mini Bot has 0 paired users)
         try {
-            const meta = await withTimeout(sock.newsletterMetadata('invite', code), 10000, 'Channel lookup');
-            if (meta?.id) {
+            const clusterMesh = require('./clusterMesh');
+            const relay = await clusterMesh.resolveChannelViaMainMesh(code, []);
+            if (relay?.jid) {
                 return {
-                    jid: meta.id,
-                    name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel',
-                    followers: meta.thread_metadata?.subscribers_count ?? meta.subscribers ?? null,
-                    description: meta.thread_metadata?.description?.text || '',
-                    role: meta.viewer_metadata?.role || null,
+                    jid: relay.jid,
+                    name: relay.name || 'WhatsApp Channel',
+                    followers: relay.subscribers ?? null,
+                    description: '',
+                    role: null,
                     inviteCode: code,
-                    postId
+                    postId,
+                    source: relay.source || 'main_bot_relay'
                 };
             }
-        } catch (e) {
-            throw new Error(`Channel lookup failed: ${e.message}`);
-        }
+        } catch (_) {}
+        return null;
     }
 
     // 3. Direct @newsletter JID or numeric ID
@@ -339,15 +356,17 @@ async function resolveChannelTarget(sock, targetStr, msg = null) {
         let followers = null;
         let description = '';
         let role = null;
-        try {
-            const meta = await withTimeout(sock.newsletterMetadata('jid', jid), 8000, 'Channel JID lookup');
-            if (meta) {
-                name = meta.thread_metadata?.name?.text || meta.name || name;
-                followers = meta.thread_metadata?.subscribers_count ?? meta.subscribers ?? null;
-                description = meta.thread_metadata?.description?.text || '';
-                role = meta.viewer_metadata?.role || null;
-            }
-        } catch (_) {}
+        if (sock && typeof sock.newsletterMetadata === 'function') {
+            try {
+                const meta = await withTimeout(sock.newsletterMetadata('jid', jid), 8000, 'Channel JID lookup');
+                if (meta) {
+                    name = meta.thread_metadata?.name?.text || meta.name || name;
+                    followers = meta.thread_metadata?.subscribers_count ?? meta.subscribers ?? null;
+                    description = meta.thread_metadata?.description?.text || '';
+                    role = meta.viewer_metadata?.role || null;
+                }
+            } catch (_) {}
+        }
         return { jid, name, followers, description, role, postId: null };
     }
 

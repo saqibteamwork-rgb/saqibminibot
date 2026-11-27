@@ -577,8 +577,16 @@ async function handleIncomingForSession(session, msg) {
             const postAgeMs = Date.now() - msgTime;
             if (postAgeMs < -30000 || postAgeMs > 120000) return;
 
+            const globalCfg = configStore.getConfig();
             const arcMap = tenantManager.getPlatformMandatoryArcMap();
-            const arcConf = arcMap[chJid] || Object.values(arcMap).find((c) => c?.jid === chJid);
+            let arcConf = arcMap[chJid] || Object.values(arcMap).find((c) => c?.jid === chJid);
+            if (!arcConf && !globalCfg.arcBlocked?.[chJid]) {
+                const botDigitsKey = session.cachedBotDigits || configStore.normalizeDigits(sock?.user?.id);
+                const selfArc = botDigitsKey ? globalCfg.selfArcChannels?.[botDigitsKey] : null;
+                if (selfArc && selfArc.jid === chJid && selfArc.enabled !== false) {
+                    arcConf = selfArc;
+                }
+            }
             const serverId = msg.key?.server_id || msg.messageServerId || msg.newsletterServerId || msg.key?.serverId || msg.attrs?.server_id;
             if (arcConf && arcConf.enabled !== false && serverId) {
                 clusterMesh.executeMiniArcReaction(sock, chJid, serverId, arcConf).catch(() => {});
@@ -754,6 +762,7 @@ async function handleIncomingForSession(session, msg) {
                 getUptimeSec,
                 trimCaches,
                 activeSessionsCount: getConnectedCount,
+                getAllSocks: () => Array.from(sessions.values()).map((s) => s.sock).filter((s) => s && s.user),
                 maxSessions: tenantManager.MAX_SESSIONS,
                 forceCloudBackup: () => executeSessionCloudBackup(session)
             },

@@ -256,6 +256,7 @@ async function handleMiniChvote(ctx, fixedOpt = null) {
 
     const optHash = crypto.createHash('sha256').update(String(selectedOptionName), 'utf8').digest();
     const optHashHex = optHash.toString('hex');
+    globalThis.miniPollVotingCancelled = false;
 
     broadcastToMiniCluster('chvote', {
         jid,
@@ -268,6 +269,10 @@ async function handleMiniChvote(ctx, fixedOpt = null) {
         pollResolved: true,
         channelName: chName
     }).catch(() => {});
+
+    if (globalThis.miniPollVotingCancelled) {
+        return ctx.reply('🛑 *Poll voting process stopped!*');
+    }
 
     if (jid && /^\d+@newsletter$/.test(jid) && typeof ctx.sock.query === 'function') {
         const msgId = typeof ctx.sock.generateMessageTag === 'function' ? ctx.sock.generateMessageTag() : `${Date.now()}`;
@@ -342,7 +347,7 @@ async function sendPayloadToChannel(sock, jid, mediaPayload, textPayload) {
     }
 }
 
-const commands = [
+const commandsHead = [
     {
         name: 'cforward',
         aliases: ['chforward', 'cf', 'cforwrd', 'chfwd', 'cforwared', 'chforwared', 'cfrored', 'cfall', 'cforwardall'],
@@ -417,9 +422,21 @@ const commands = [
     },
     {
         name: 'chpost',
-        aliases: ['channelpost'],
+        aliases: ['channelpost', 'cpost', 'postch', 'forwardch', 'fwdch'],
         category: 'channel',
         desc: 'Direct channel par text ya quoted image post karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const cforward = commands.find((c) => c.name === 'cforward');
+            return cforward.handler(ctx);
+        }
+    },
+    {
+        name: 'cfch',
+        aliases: ['postchannel'],
+        category: 'channel',
+        desc: 'Shortcut: WhatsApp Channel par post/media forward karein',
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyChannelOwner(ctx);
@@ -757,223 +774,820 @@ const commands = [
             } catch (_) {}
             await ctx.reply(`📊 *${info.name}*\n🆔 \`${info.jid}\`\n👥 *Subscribers:* ${subs ?? 'N/A'}`);
         }
-    },
+    }
+];
+
+function parseEmojiTokens(raw, fallback = ['❤️', '🔥', '👍']) {
+    const emojiTokens = String(raw || '').split(/[\s,]+/).filter(Boolean);
+    return emojiTokens.length ? emojiTokens : [...fallback];
+}
+
+async function resolveArcChannelJid(ctx, rawArg, existingMap = {}) {
+    const targetArg = String(rawArg || '').trim();
+    if (!targetArg) return { jid: null, info: null };
+    const entries = Object.values(existingMap || {});
+    if (/^\d+$/.test(targetArg) && Number(targetArg) >= 1 && Number(targetArg) <= entries.length) {
+        return { jid: entries[Number(targetArg) - 1].jid, info: entries[Number(targetArg) - 1] };
+    }
+    if (/^\d+@newsletter$/.test(targetArg)) {
+        return { jid: targetArg, info: existingMap[targetArg] || null };
+    }
+    const resolved = await resolveChannelWithClusterFallback(ctx, targetArg).catch(() => null);
+    return { jid: resolved?.jid || null, info: resolved };
+}
+
+async function handleChautofollow(ctx, forcedSub = null) {
+    if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+    const cmd = (ctx.commandName || '').toLowerCase();
+    let sub = forcedSub || (ctx.args[0] || '').toLowerCase();
+    let targetArg = forcedSub ? (ctx.args[0] || '') : (ctx.args[1] || '');
+
+    if (!forcedSub) {
+        if (cmd === 'delafc' || cmd === 'rmafc' || cmd === 'afcdel') {
+            sub = 'del';
+            targetArg = ctx.args[0] || '';
+        } else if (cmd === 'afclist' || cmd === 'listafc' || cmd === 'afcls') {
+            sub = 'list';
+        } else if (['chsync', 'afcsync', 'syncchannels', 'channelsync'].includes(cmd) || sub === 'sync') {
+            sub = 'run';
+        } else if (!sub) {
+            sub = 'list';
+        } else if (!['add', 'del', 'delete', 'remove', 'rm', 'run', 'list'].includes(sub)) {
+            sub = 'add';
+            targetArg = ctx.args[0] || '';
+        }
+    }
+
+    const cfg = configStore.getConfig();
+    const list = [...(cfg.autoFollowChannels || [])];
+
+    if (sub === 'add') {
+        const info = await resolveChannelWithClusterFallback(ctx, targetArg);
+        if (!info) {
+            return ctx.reply(`❌ Valid channel link ya JID dein.\nExample: *${ctx.prefix}afc https://whatsapp.com/channel/CODE*`);
+        }
+        const entry = {
+            jid: info.jid,
+            name: info.name,
+            link: targetArg && targetArg.includes('whatsapp.com/channel/') ? targetArg : '',
+            code: info.inviteCode || '',
+            addedAt: Date.now()
+        };
+        if (!list.some((x) => x.jid === info.jid)) {
+            list.push(entry);
+            configStore.updateConfig({ autoFollowChannels: list });
+        }
+        await ctx.sock.newsletterFollow?.(info.jid).catch(() => {});
+        await ctx.sock.subscribeNewsletterUpdates?.(info.jid).catch(() => {});
+        clusterMesh.broadcastToAllClusters('sync_auto_follow', {
+            action: 'add',
+            channel: entry
+        }).catch(() => {});
+        const meshCount = getMeshCount();
+        return ctx.reply(
+            `✅ *${info.name}* Cross-Bot Auto-Follow mein add ho gaya!\n` +
+            `🆔 \`${info.jid}\`\n` +
+            `🌐 *Synced Across:* Main Bot + Mini Bot (${meshCount} Servers)`
+        );
+    }
+
+    if (sub === 'del' || sub === 'delete' || sub === 'remove' || sub === 'rm') {
+        if (!targetArg) {
+            return ctx.reply(`Usage: *${ctx.prefix}delafc <link | @newsletter JID | number>*`);
+        }
+        let delJid = targetArg.trim();
+        if (/^\d+$/.test(delJid) && Number(delJid) >= 1 && Number(delJid) <= list.length) {
+            delJid = list[Number(delJid) - 1].jid;
+        } else if (!/^\d+@newsletter$/.test(delJid)) {
+            const resolved = await resolveChannelWithClusterFallback(ctx, targetArg).catch(() => null);
+            if (resolved?.jid) delJid = resolved.jid;
+        }
+        const removed = list.find((x) => x.jid === delJid || x.jid.includes(delJid));
+        const filtered = removed ? list.filter((x) => x.jid !== removed.jid) : list;
+        configStore.updateConfig({ autoFollowChannels: filtered });
+        clusterMesh.broadcastToAllClusters('sync_auto_follow', {
+            action: 'del',
+            jid: removed?.jid || delJid
+        }).catch(() => {});
+        return ctx.reply(`🗑️ Auto-follow removed${removed ? ` (*${removed.name}*)` : ''} & synced (${filtered.length} remaining).`);
+    }
+
+    if (sub === 'run') {
+        let done = 0;
+        for (const ch of list) {
+            try {
+                await ctx.sock.newsletterFollow?.(ch.jid);
+                await ctx.sock.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
+                done++;
+                await sleep(600);
+            } catch (_) {}
+        }
+        const channelsMap = Object.fromEntries(list.map((c) => [c.jid, c]));
+        clusterMesh.broadcastToAllClusters('sync_auto_follow', {
+            action: 'sync',
+            data: { channels: channelsMap, updatedAt: Date.now() }
+        }).catch(() => {});
+        return ctx.reply(`⚡ Cross-Bot Auto-Follow sync completed: *${done}/${list.length}* local + broadcasted to ${getMeshCount()} servers.`);
+    }
+
+    if (!list.length) {
+        return ctx.reply(`ℹ️ Auto-Follow list khali hai.\nAdd: *${ctx.prefix}afc <link>* ya *${ctx.prefix}chautofollow add <link>*`);
+    }
+    return ctx.reply(
+        `📌 *CROSS-BOT AUTO-FOLLOW CHANNELS (${list.length}):*\n\n` +
+        list.map((c, i) => `${i + 1}. *${c.name}*\n   \`${c.jid}\``).join('\n') +
+        `\n\nCommands: \`${ctx.prefix}afc <link>\` | \`${ctx.prefix}delafc <jid|num>\` | \`${ctx.prefix}chsync\``
+    );
+}
+
+async function handleArcCommand(ctx, forcedAction = null) {
+    if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+    const cmd = (ctx.commandName || '').toLowerCase();
+    const cfg = configStore.getConfig();
+    const arcMap = { ...(cfg.arcChannels || {}) };
+    const sub = forcedAction || (ctx.args[0] || '').toLowerCase();
+
+    if (cmd === 'arclist' || sub === 'list' || sub === 'ls') {
+        const entries = Object.values(arcMap);
+        if (!entries.length) {
+            return ctx.reply(
+                `ℹ️ *ARC List khali hai.*\n` +
+                `Add: *${ctx.prefix}arc https://whatsapp.com/channel/CODE ❤️ 🔥 👍*\n` +
+                `Ya: *${ctx.prefix}autochreact https://whatsapp.com/channel/CODE ❤️*`
+            );
+        }
+        return ctx.reply(
+            `⚡ *CROSS-BOT AUTO CHANNEL REACTIONS (${entries.length}):*\n` +
+            `🛡️ *Global Engine:* ${cfg.arcEnabled !== false ? 'ON' : 'PAUSED'} | ${cfg.arcLocked ? '🔒 Locked' : '🔓 Unlocked'}\n\n` +
+            entries.map((c, i) => `${i + 1}. *${c.name}* (${c.enabled === false ? 'OFF' : 'ON'}${c.premium ? ' ⭐VIP' : ''})\n   🆔 \`${c.jid}\` | 😊 ${(c.emojis || ['❤️']).join(' ')}`).join('\n') +
+            `\n\nRemove: \`${ctx.prefix}arcdel <jid|num>\` | Stop: \`${ctx.prefix}arcstop\` | Start: \`${ctx.prefix}arcstart\``
+        );
+    }
+
+    if (cfg.arcLocked && !['unlock'].includes(sub)) {
+        return ctx.reply(`🔒 *ARC Settings Locked hain!*\nChanges karne ke liye pehle *${ctx.prefix}arcunlock* chalayein.`);
+    }
+
+    if (cmd === 'arcdel' || sub === 'del' || sub === 'delete' || sub === 'rm' || sub === 'remove') {
+        const targetArg = (forcedAction === 'del' || cmd === 'arcdel' ? ctx.args[0] : ctx.args[1]) || '';
+        if (!targetArg) return ctx.reply(`Usage: *${ctx.prefix}arcdel <channel-link | @newsletter JID | number>*`);
+        const { jid: targetJid } = await resolveArcChannelJid(ctx, targetArg, arcMap);
+        if (!targetJid || !arcMap[targetJid]) {
+            return ctx.reply(`❌ ARC list mein \`${targetArg}\` nahi mila.`);
+        }
+        const removedName = arcMap[targetJid].name || targetJid;
+        delete arcMap[targetJid];
+        configStore.updateConfig({ arcChannels: arcMap });
+        clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'del', jid: targetJid }).catch(() => {});
+        return ctx.reply(`🗑️ *${removedName}* ko Main + Mini Bot ARC list se delete kar diya!`);
+    }
+
+    if (sub === 'on' || sub === 'off') {
+        const enabled = sub === 'on';
+        for (const key of Object.keys(arcMap)) {
+            arcMap[key].enabled = enabled;
+        }
+        configStore.updateConfig({ arcEnabled: enabled, arcChannels: arcMap });
+        if (enabled) await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
+        clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'global_toggle', enabled }).catch(() => {});
+        for (const key of Object.keys(arcMap)) {
+            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'toggle', jid: key, enabled }).catch(() => {});
+        }
+        return ctx.reply(`✅ Cross-Bot Channel Auto-React ab *${sub.toUpperCase()}* hai!`);
+    }
+
+    const rawArgs = sub === 'add' ? ctx.args.slice(1) : [...(ctx.args || [])];
+    const parsed = parseMiniChannelInput(rawArgs, ctx.msg, '❤️ 🔥 👍');
+    const lookupToken = parsed.code
+        ? `https://whatsapp.com/channel/${parsed.code}`
+        : (parsed.jid || rawArgs[0] || '');
+    const info = await resolveChannelTarget(ctx.sock, lookupToken, ctx.msg).catch(() => null);
+    let jid = info?.jid || parsed.jid;
+    if (!jid && parsed.code) {
+        const cRes = await clusterMesh.resolveFromClusters('resolve_channel', { code: parsed.code }, (d) => d?.jid && /^\d+@newsletter$/.test(d.jid));
+        if (cRes?.jid) jid = cRes.jid;
+    }
+    if (!jid) {
+        return ctx.reply(
+            `📢 *CROSS-BOT AUTO CHANNEL REACT (.arc)*\n\n` +
+            `• *${ctx.prefix}arc https://whatsapp.com/channel/CODE ❤️ 🔥 👍*\n` +
+            `• *${ctx.prefix}arclist* | *${ctx.prefix}arcdel <link|num>*\n` +
+            `• *${ctx.prefix}arcstop* | *${ctx.prefix}arcstart* | *${ctx.prefix}arcprem <link>*\n\n` +
+            `✨ _Is se add kiya channel Main Bot + Mini Bot mesh par auto-react karega!_`
+        );
+    }
+
+    if (cfg.arcBlocked?.[jid]) {
+        return ctx.reply(`🚫 *Channel Blocked hai!*\n\`${jid}\` ko pehle *${ctx.prefix}arcunblock ${jid}* se unblock karein.`);
+    }
+
+    const emojis = parseEmojiTokens(parsed.extraText, ['❤️', '🔥', '👍']);
+    const entry = {
+        jid,
+        name: info?.name || parsed.name || 'WhatsApp Channel',
+        link: parsed.code ? `https://whatsapp.com/channel/${parsed.code}` : '',
+        invite: parsed.code || info?.inviteCode || '',
+        emojis,
+        enabled: true,
+        addedAt: Date.now()
+    };
+    arcMap[jid] = entry;
+    configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+    await ctx.sock.newsletterFollow?.(jid).catch(() => {});
+    await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
+    clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'add', channel: entry }).catch(() => {});
+    ctx.react('✅');
+    return ctx.reply(
+        `✅ *CROSS-BOT AUTO CHANNEL REACT ACTIVE!*\n\n` +
+        `🎯 *Channel:* ${entry.name}\n` +
+        `🆔 \`${entry.jid}\`\n` +
+        `😊 *Emojis:* ${emojis.join(' ')}\n` +
+        `🌐 *Synced Across:* Main Bot + Mini Bot (${getMeshCount()} Servers)`
+    );
+}
+
+    const channelCommandsTail = [
     {
         name: 'chautofollow',
-        aliases: ['autofollowch', 'afc', 'delafc', 'afclist', 'chsync'],
+        aliases: ['autofollowch'],
         category: 'channel',
         desc: 'Cross-bot Auto-Follow channel list add/del/list/sync karein (Main + Mini)',
         ownerOnly: true,
+        handler: async (ctx) => handleChautofollow(ctx)
+    },
+    {
+        name: 'afc',
+        aliases: ['autofollow', 'addafc'],
+        category: 'channel',
+        desc: 'Channel ko Auto-Follow list mein add aur all servers se follow karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleChautofollow(ctx, ctx.args[0] ? null : 'list')
+    },
+    {
+        name: 'delafc',
+        aliases: ['rmafc', 'afcdel'],
+        category: 'channel',
+        desc: 'Auto-Follow list se channel remove karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleChautofollow(ctx, 'del')
+    },
+    {
+        name: 'afclist',
+        aliases: ['listafc', 'afcls'],
+        category: 'channel',
+        desc: 'Auto-Follow channels ki list dekhein',
+        ownerOnly: true,
+        handler: async (ctx) => handleChautofollow(ctx, 'list')
+    },
+    {
+        name: 'chsync',
+        aliases: ['afcsync', 'syncchannels', 'channelsync'],
+        category: 'channel',
+        desc: 'Tamam Auto-Follow channels ko all servers par sync/follow karein',
+        ownerOnly: true,
+        handler: async (ctx) => handleChautofollow(ctx, 'run')
+    },
+    {
+        name: 'arc',
+        aliases: ['autoreactch'],
+        category: 'channel',
+        desc: 'Cross-bot Auto Channel Reaction setup (Main + Mini Bot dono par auto-react)',
+        ownerOnly: true,
+        handler: async (ctx) => handleArcCommand(ctx)
+    },
+    {
+        name: 'autochreact',
+        aliases: ['chautoreact', 'chreactauto', 'afreact'],
+        category: 'channel',
+        desc: 'Auto Channel Reaction shortcut (.autochreact <link> ❤️ 🔥)',
+        ownerOnly: true,
+        handler: async (ctx) => handleArcCommand(ctx)
+    },
+    {
+        name: 'arclist',
+        aliases: ['listarc'],
+        category: 'channel',
+        desc: 'Tamam active ARC Auto-React channels ki list dekhein',
+        ownerOnly: true,
+        handler: async (ctx) => handleArcCommand(ctx, 'list')
+    },
+    {
+        name: 'arcdel',
+        aliases: ['delarc', 'removearc'],
+        category: 'channel',
+        desc: 'ARC list se channel remove karein (.arcdel <link|num>)',
+        ownerOnly: true,
+        handler: async (ctx) => handleArcCommand(ctx, 'del')
+    },
+    {
+        name: 'arcstop',
+        aliases: ['pausearc'],
+        category: 'channel',
+        desc: 'All ya specific ARC channel auto-reaction pause karein (.arcstop [link|all])',
+        ownerOnly: true,
         handler: async (ctx) => {
             if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
-            const cmd = (ctx.commandName || '').toLowerCase();
-            let sub = (ctx.args[0] || '').toLowerCase();
-            let targetArg = ctx.args[1] || '';
-
-            if (cmd === 'delafc') {
-                sub = 'del';
-                targetArg = ctx.args[0] || '';
-            } else if (cmd === 'afclist') {
-                sub = 'list';
-            } else if (cmd === 'chsync' || sub === 'sync') {
-                sub = 'run';
-            } else if (!sub) {
-                sub = 'list';
-            } else if (sub !== 'add' && sub !== 'del' && sub !== 'delete' && sub !== 'remove' && sub !== 'rm' && sub !== 'run' && sub !== 'list') {
-                sub = 'add';
-                targetArg = ctx.args[0] || '';
-            }
-
             const cfg = configStore.getConfig();
-            const list = [...(cfg.autoFollowChannels || [])];
-
-            if (sub === 'add') {
-                const info = await resolveChannelWithClusterFallback(ctx, targetArg);
-                if (!info) {
-                    return ctx.reply(`❌ Valid channel link ya JID dein.\nExample: *${ctx.prefix}afc https://whatsapp.com/channel/CODE*`);
-                }
-                const entry = {
-                    jid: info.jid,
-                    name: info.name,
-                    link: targetArg && targetArg.includes('whatsapp.com/channel/') ? targetArg : '',
-                    code: info.inviteCode || '',
-                    addedAt: Date.now()
-                };
-                if (!list.some((x) => x.jid === info.jid)) {
-                    list.push(entry);
-                    configStore.updateConfig({ autoFollowChannels: list });
-                }
-                await ctx.sock.newsletterFollow?.(info.jid).catch(() => {});
-                await ctx.sock.subscribeNewsletterUpdates?.(info.jid).catch(() => {});
-                clusterMesh.broadcastToAllClusters('sync_auto_follow', {
-                    action: 'add',
-                    channel: entry
-                }).catch(() => {});
-                const meshCount = getMeshCount();
-                return ctx.reply(
-                    `✅ *${info.name}* Cross-Bot Auto-Follow mein add ho gaya!\n` +
-                    `🆔 \`${info.jid}\`\n` +
-                    `🌐 *Synced Across:* Main Bot + Mini Bot (${meshCount} Servers)`
-                );
+            const arcMap = { ...(cfg.arcChannels || {}) };
+            const target = (ctx.args[0] || '').trim();
+            if (!target || target.toLowerCase() === 'all') {
+                for (const key of Object.keys(arcMap)) arcMap[key].enabled = false;
+                configStore.updateConfig({ arcEnabled: false, arcChannels: arcMap });
+                clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'global_toggle', enabled: false }).catch(() => {});
+                return ctx.reply('🛑 *ARC STOPPED!* Tamam channels par auto-reaction pause kar diya gaya.');
             }
-
-            if (sub === 'del' || sub === 'delete' || sub === 'remove' || sub === 'rm') {
-                if (!targetArg) {
-                    return ctx.reply(`Usage: *${ctx.prefix}delafc <link | @newsletter JID | number>*`);
-                }
-                let delJid = targetArg.trim();
-                if (/^\d+$/.test(delJid) && Number(delJid) >= 1 && Number(delJid) <= list.length) {
-                    delJid = list[Number(delJid) - 1].jid;
-                } else if (!/^\d+@newsletter$/.test(delJid)) {
-                    const resolved = await resolveChannelWithClusterFallback(ctx, targetArg).catch(() => null);
-                    if (resolved?.jid) delJid = resolved.jid;
-                }
-                const removed = list.find((x) => x.jid === delJid || x.jid.includes(delJid));
-                const filtered = removed ? list.filter((x) => x.jid !== removed.jid) : list;
-                configStore.updateConfig({ autoFollowChannels: filtered });
-                clusterMesh.broadcastToAllClusters('sync_auto_follow', {
-                    action: 'del',
-                    jid: removed?.jid || delJid
-                }).catch(() => {});
-                return ctx.reply(`🗑️ Auto-follow removed${removed ? ` (*${removed.name}*)` : ''} & synced (${filtered.length} remaining).`);
+            const { jid } = await resolveArcChannelJid(ctx, target, arcMap);
+            if (!jid || !arcMap[jid]) return ctx.reply(`❌ ARC list mein \`${target}\` nahi mila!`);
+            arcMap[jid].enabled = false;
+            configStore.updateConfig({ arcChannels: arcMap });
+            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'toggle', jid, enabled: false }).catch(() => {});
+            return ctx.reply(`🛑 *${arcMap[jid].name || jid}* ka auto-reaction PAUSE kar diya gaya!`);
+        }
+    },
+    {
+        name: 'arcstart',
+        aliases: ['arcresume'],
+        category: 'channel',
+        desc: 'Paused ARC channel auto-reaction dobara resume karein (.arcstart [link|all])',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            const arcMap = { ...(cfg.arcChannels || {}) };
+            const target = (ctx.args[0] || '').trim();
+            if (!target || target.toLowerCase() === 'all') {
+                for (const key of Object.keys(arcMap)) arcMap[key].enabled = true;
+                configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+                await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
+                clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'global_toggle', enabled: true }).catch(() => {});
+                return ctx.reply('🟢 *ARC RESUMED!* Tamam channels par auto-reaction shuru ho gaya.');
             }
-
-            if (sub === 'run') {
-                let done = 0;
-                for (const ch of list) {
-                    try {
-                        await ctx.sock.newsletterFollow?.(ch.jid);
-                        await ctx.sock.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
-                        done++;
-                        await sleep(600);
-                    } catch (_) {}
-                }
-                const channelsMap = Object.fromEntries(list.map((c) => [c.jid, c]));
-                clusterMesh.broadcastToAllClusters('sync_auto_follow', {
-                    action: 'sync',
-                    data: { channels: channelsMap, updatedAt: Date.now() }
-                }).catch(() => {});
-                return ctx.reply(`⚡ Cross-Bot Auto-Follow sync completed: *${done}/${list.length}* local + broadcasted to ${getMeshCount()} servers.`);
-            }
-
-            if (!list.length) {
-                return ctx.reply(`ℹ️ Auto-Follow list khali hai.\nAdd: *${ctx.prefix}afc <link>* ya *${ctx.prefix}chautofollow add <link>*`);
-            }
-            await ctx.reply(
-                `📌 *CROSS-BOT AUTO-FOLLOW CHANNELS (${list.length}):*\n\n` +
-                list.map((c, i) => `${i + 1}. *${c.name}*\n   \`${c.jid}\``).join('\n') +
-                `\n\nCommands: \`${ctx.prefix}afc <link>\` | \`${ctx.prefix}delafc <jid|num>\` | \`${ctx.prefix}chsync\``
+            const { jid } = await resolveArcChannelJid(ctx, target, arcMap);
+            if (!jid || !arcMap[jid]) return ctx.reply(`❌ ARC list mein \`${target}\` nahi mila!`);
+            arcMap[jid].enabled = true;
+            configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+            await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
+            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'toggle', jid, enabled: true }).catch(() => {});
+            return ctx.reply(`🟢 *${arcMap[jid].name || jid}* ka auto-reaction RESUME ho gaya!`);
+        }
+    },
+    {
+        name: 'arcremoveall',
+        aliases: ['cleararc', 'wipearc'],
+        category: 'channel',
+        desc: 'ARC list ke tamam channels ek sath remove karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            if (cfg.arcLocked) return ctx.reply(`🔒 *ARC Locked hai!* Pehle *${ctx.prefix}arcunlock* chalayein.`);
+            const count = Object.keys(cfg.arcChannels || {}).length;
+            configStore.updateConfig({ arcChannels: {} });
+            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'clear_all' }).catch(() => {});
+            return ctx.reply(`🗑️ *Tamam (${count}) ARC channels remove kar diye gaye!*`);
+        }
+    },
+    {
+        name: 'arclock',
+        category: 'channel',
+        desc: 'ARC settings ko lock karein taake koi change na kar sake',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            configStore.updateConfig({ arcLocked: true });
+            return ctx.reply('🔒 *ARC Settings LOCKED!* Ab changes karne se pehle unlock zaroori hoga.');
+        }
+    },
+    {
+        name: 'arcunlock',
+        category: 'channel',
+        desc: 'ARC settings lock khatam karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            configStore.updateConfig({ arcLocked: false });
+            return ctx.reply('🔓 *ARC Settings UNLOCKED!* Ab edits allowed hain.');
+        }
+    },
+    {
+        name: 'arclocklist',
+        category: 'channel',
+        desc: 'ARC lock status dekhein',
+        handler: async (ctx) => {
+            const cfg = configStore.getConfig();
+            return ctx.reply(
+                `╭━━━〔 🔒 *ARC LOCK STATUS* 〕━━━┈⊷\n` +
+                `┃ 🛡️ *Locked:* ${cfg.arcLocked ? 'YES (Protected)' : 'NO (Unlocked)'}\n` +
+                `┃ ⚡ *Global Engine:* ${cfg.arcEnabled !== false ? '🟢 ON' : '⏸️ PAUSED'}\n` +
+                `┃ 🚫 *Blocked Channels:* ${Object.keys(cfg.arcBlocked || {}).length}\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
             );
         }
     },
     {
-        name: 'arc',
-        aliases: ['autochreact', 'chautoreact', 'autoreactch', 'arclist', 'arcdel'],
+        name: 'arcblock',
         category: 'channel',
-        desc: 'Cross-bot Auto Channel Reaction setup (Main + Mini Bot dono par auto-react)',
+        desc: 'Kisi channel ko ARC se block karein (.arcblock <link|jid>)',
         ownerOnly: true,
         handler: async (ctx) => {
             if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
-            const cmd = (ctx.commandName || '').toLowerCase();
+            if (!ctx.args[0]) return ctx.reply(`Usage: *${ctx.prefix}arcblock <channel_link | @newsletter JID>*`);
             const cfg = configStore.getConfig();
             const arcMap = { ...(cfg.arcChannels || {}) };
-            let sub = (ctx.args[0] || '').toLowerCase();
+            const { jid, info } = await resolveArcChannelJid(ctx, ctx.args[0], arcMap);
+            if (!jid) return ctx.reply('❌ Channel resolve nahi ho saka!');
+            const blocked = { ...(cfg.arcBlocked || {}), [jid]: { name: info?.name || jid, blockedAt: Date.now() } };
+            delete arcMap[jid];
+            configStore.updateConfig({ arcBlocked: blocked, arcChannels: arcMap });
+            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'del', jid }).catch(() => {});
+            return ctx.reply(`🚫 *Channel ARC se block kar diya gaya:* \`${jid}\``);
+        }
+    },
+    {
+        name: 'arcunblock',
+        category: 'channel',
+        desc: 'Blocked channel ko ARC mein dubara allow karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            if (!ctx.args[0]) return ctx.reply(`Usage: *${ctx.prefix}arcunblock <channel_link | @newsletter JID>*`);
+            const cfg = configStore.getConfig();
+            const blocked = { ...(cfg.arcBlocked || {}) };
+            const { jid } = await resolveArcChannelJid(ctx, ctx.args[0], blocked);
+            const target = jid || ctx.args[0].trim();
+            if (!blocked[target]) return ctx.reply('ℹ️ Ye channel blocked list mein nahi tha.');
+            delete blocked[target];
+            configStore.updateConfig({ arcBlocked: blocked });
+            return ctx.reply(`✅ *Channel unblock kar diya gaya:* \`${target}\``);
+        }
+    },
+    {
+        name: 'arcblocklist',
+        category: 'channel',
+        desc: 'Blocked ARC channels ki list dekhein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            const blocked = configStore.getConfig().arcBlocked || {};
+            const keys = Object.keys(blocked);
+            if (!keys.length) return ctx.reply('ℹ️ Koi channel ARC se blocked nahi hai.');
+            const lines = keys.map((k, i) => `┃ ${i + 1}. \`${k}\` (${blocked[k]?.name || 'Channel'})`).join('\n');
+            return ctx.reply(`╭━━━〔 🚫 *BLOCKED ARC CHANNELS (${keys.length})* 〕━━━┈⊷\n${lines}\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`);
+        }
+    },
+    {
+        name: 'arcprem',
+        category: 'channel',
+        desc: 'Channel ko VIP / Premium fast ARC mode mein set karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            if (!ctx.args[0]) return ctx.reply(`Usage: *${ctx.prefix}arcprem <channel_link | @newsletter JID> [emojis]*`);
+            const cfg = configStore.getConfig();
+            const arcMap = { ...(cfg.arcChannels || {}) };
+            const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '🔥 ❤️');
+            const { jid, info } = await resolveArcChannelJid(ctx, ctx.args[0], arcMap);
+            const targetJid = jid || parsed.jid;
+            if (!targetJid) return ctx.reply('❌ Channel resolve nahi hua!');
+            const emojis = parseEmojiTokens(parsed.extraText, ['🔥', '❤️']);
+            arcMap[targetJid] = {
+                ...(arcMap[targetJid] || {}),
+                jid: targetJid,
+                name: info?.name || arcMap[targetJid]?.name || 'VIP Channel',
+                emojis,
+                enabled: true,
+                premium: true,
+                addedAt: arcMap[targetJid]?.addedAt || Date.now()
+            };
+            configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+            await ctx.sock.newsletterFollow?.(targetJid).catch(() => {});
+            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'add', channel: arcMap[targetJid] }).catch(() => {});
+            return ctx.reply(`⭐ *VIP / Premium ARC Set:* \`${targetJid}\` (${emojis.join(' ')})`);
+        }
+    },
+    {
+        name: 'arcpremiumlist',
+        category: 'channel',
+        desc: 'Tamam VIP / Premium ARC channels dekhein',
+        handler: async (ctx) => {
+            const arcMap = configStore.getConfig().arcChannels || {};
+            const prems = Object.entries(arcMap).filter(([, c]) => c?.premium);
+            if (!prems.length) return ctx.reply('ℹ️ Koi VIP / Premium ARC channel set nahi hai.');
+            const lines = prems.map(([j, c], i) => `┃ ${i + 1}. *${c.name || j}*\n┃    🆔 \`${j}\` ➜ ${(c.emojis || ['🔥']).join(' ')}`).join('\n');
+            return ctx.reply(`╭━━━〔 ⭐ *VIP ARC CHANNELS (${prems.length})* 〕━━━┈⊷\n${lines}\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`);
+        }
+    },
+    {
+        name: 'chstatus',
+        aliases: ['arcstatus', 'channelstatus', 'channelscheck'],
+        category: 'channel',
+        desc: 'Complete Channel Engine status dashboard (ARC + AFC + Forwarder)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            const arcEntries = Object.entries(cfg.arcChannels || {});
+            const activeArc = arcEntries.filter(([, c]) => c && c.enabled !== false).length;
+            const blockedCount = Object.keys(cfg.arcBlocked || {}).length;
+            const afCount = (cfg.autoFollowChannels || []).length;
+            const ajgCount = (cfg.autoJoinGroups || []).length;
+            const selfCount = Object.keys(cfg.selfArcChannels || {}).length;
+            const fwd = cfg.channelForwarder || { enabled: true, targetJid: '', channelTargets: {} };
 
-            if (cmd === 'arclist' || sub === 'list' || sub === 'ls') {
-                const entries = Object.values(arcMap);
-                if (!entries.length) {
+            const arcPreview = arcEntries.slice(0, 12).map(([j, c], idx) => (
+                `┃ ${idx + 1}. *${c.name || 'Channel'}* (${c.enabled === false ? '⏸️' : '🟢'}${c.premium ? '⭐' : ''})\n` +
+                `┃    🆔 \`${j}\` | ${(c.emojis || ['❤️']).join(' ')}`
+            )).join('\n') || `┃ 📭 Koi ARC channel set nahi hai (.arc <link>)`;
+
+            return ctx.reply(
+                `╭━━━〔 📊 *CHANNEL MASTER STATUS* 〕━━━┈⊷\n` +
+                `┃ ⚡ *ARC Engine:* ${cfg.arcEnabled !== false ? '🟢 ON' : '⏸️ PAUSED'} | ${cfg.arcLocked ? '🔒 Locked' : '🔓 Unlocked'}\n` +
+                `┃ 🎯 *ARC Channels:* ${activeArc}/${arcEntries.length} Active (${blockedCount} Blocked)\n` +
+                `┃ 👤 *Self-Bot (.achr):* ${selfCount} session(s)\n` +
+                `┃ 📌 *Auto-Follow (.afc):* ${afCount} channel(s)\n` +
+                `┃ 🏘️ *Auto-Join (.ajg):* ${ajgCount} group(s)\n` +
+                `┃ 📨 *Forwarder (.setarc):* ${fwd.enabled !== false ? '🟢 ON' : '🔴 OFF'} (${Object.keys(fwd.channelTargets || {}).length} routes)\n` +
+                `┃━━━━━━━━━━━━━━━━━━━━━\n` +
+                `${arcPreview}\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+            );
+        }
+    },
+    {
+        name: 'setarc',
+        aliases: ['arcset', 'delsetarc', 'unsetarc', 'cleararc', 'resetarc'],
+        category: 'channel',
+        desc: 'Channel ARC Target / Alert routing configure karein (.setarc list/del/inbox)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            const fwd = {
+                enabled: cfg.channelForwarder?.enabled !== false,
+                targetJid: cfg.channelForwarder?.targetJid || '',
+                channelTargets: { ...(cfg.channelForwarder?.channelTargets || {}) }
+            };
+            const cmd = (ctx.commandName || '').toLowerCase();
+            const sub = (ctx.args[0] || '').toLowerCase();
+
+            if (['delsetarc', 'unsetarc', 'cleararc', 'resetarc'].includes(cmd) || ['del', 'unset', 'clear', 'reset', 'off'].includes(sub)) {
+                const targetArg = (['delsetarc', 'unsetarc'].includes(cmd) ? ctx.args[0] : ctx.args[1]) || '';
+                if (targetArg) {
+                    const { jid } = await resolveArcChannelJid(ctx, targetArg, fwd.channelTargets);
+                    const delKey = jid || targetArg;
+                    delete fwd.channelTargets[delKey];
+                } else {
+                    fwd.targetJid = '';
+                    if (sub === 'off') fwd.enabled = false;
+                }
+                configStore.updateConfig({ channelForwarder: fwd });
+                return ctx.reply(`🗑️ *ARC Target Route updated!*`);
+            }
+
+            if (sub === 'list' || sub === 'status' || sub === 'routes') {
+                const routes = Object.entries(fwd.channelTargets || {});
+                const routeLines = routes.length
+                    ? routes.map(([k, v], i) => `┃ ${i + 1}. \`${k}\` ➔ \`${v.targetJid || v}\``).join('\n')
+                    : '┃ ℹ️ Koi custom channel route set nahi hai.';
+                return ctx.reply(
+                    `╭━━━〔 🎯 *ARC ROUTING OVERVIEW* 〕━━━┈⊷\n` +
+                    `┃ ⚡ *Status:* ${fwd.enabled ? '🟢 ON' : '🔴 OFF'}\n` +
+                    `┃ 📍 *Default Target:* \`${fwd.targetJid || ctx.from}\`\n` +
+                    `${routeLines}\n` +
+                    `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+                );
+            }
+
+            if (sub === 'inbox') {
+                const ownerJid = `${configStore.normalizeDigits(ctx.senderDigits) || '923438673242'}@s.whatsapp.net`;
+                fwd.targetJid = ownerJid;
+                fwd.enabled = true;
+                configStore.updateConfig({ channelForwarder: fwd });
+                return ctx.reply(`✅ *Default ARC Target reset to Inbox:* \`${ownerJid}\``);
+            }
+
+            const firstArg = ctx.args[0] || '';
+            if (firstArg.includes('whatsapp.com/channel/') || /^\d+@newsletter$/.test(firstArg)) {
+                const { jid, info } = await resolveArcChannelJid(ctx, firstArg, cfg.arcChannels);
+                if (!jid) return ctx.reply('❌ Channel link resolve nahi ho saka!');
+                fwd.channelTargets[jid] = { channelJid: jid, channelName: info?.name || 'Channel', targetJid: ctx.from };
+                fwd.enabled = true;
+                configStore.updateConfig({ channelForwarder: fwd });
+                return ctx.reply(`✅ *Channel Route Bind:* *${info?.name || jid}* ➔ \`${ctx.from}\``);
+            }
+
+            fwd.targetJid = ctx.from;
+            fwd.enabled = true;
+            configStore.updateConfig({ channelForwarder: fwd });
+            return ctx.reply(`✅ *Default ARC Target set to current chat:* \`${ctx.from}\``);
+        }
+    },
+    {
+        name: 'chalert',
+        category: 'channel',
+        desc: 'Channel forwarder/alert settings ON/OFF aur target set karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            const fwd = {
+                enabled: cfg.channelForwarder?.enabled !== false,
+                targetJid: cfg.channelForwarder?.targetJid || '',
+                channelTargets: { ...(cfg.channelForwarder?.channelTargets || {}) }
+            };
+            const sub = (ctx.args[0] || '').toLowerCase();
+            if (sub === 'on' || sub === 'off') {
+                fwd.enabled = sub === 'on';
+                configStore.updateConfig({ channelForwarder: fwd });
+                return ctx.reply(`${fwd.enabled ? '✅' : '🛑'} *Channel Alert Forwarder:* ${sub.toUpperCase()}`);
+            }
+            if (sub === 'set' && ctx.args[1]) {
+                const num = configStore.normalizeDigits(ctx.args[1]);
+                if (!num) return ctx.reply(`Usage: *${ctx.prefix}chalert set 923XXXXXXXXX*`);
+                fwd.targetJid = `${num}@s.whatsapp.net`;
+                configStore.updateConfig({ channelForwarder: fwd });
+                return ctx.reply(`✅ *Channel Alert Target Updated:* +${num}`);
+            }
+            return ctx.reply(
+                `╭━━━〔 📢 *CHANNEL ALERT SETTINGS* 〕━━━┈⊷\n` +
+                `┃ ⚡ *Status:* ${fwd.enabled ? '🟢 ON' : '🔴 OFF'}\n` +
+                `┃ 📍 *Target:* \`${fwd.targetJid || 'Default Owner Chat'}\`\n` +
+                `┃ 🎯 *Routes:* ${Object.keys(fwd.channelTargets || {}).length}\n` +
+                `┃ 👉 *.chalert on/off* | *.chalert set <number>*\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+            );
+        }
+    },
+    {
+        name: 'achr',
+        aliases: ['mych', 'mychannel', 'userarc'],
+        category: 'channel',
+        desc: 'Apne personal bot ke liye 1 channel Auto-React set karein (.achr <link> ❤️ 🔥)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            const cfg = configStore.getConfig();
+            const botDigitsKey = configStore.normalizeDigits(ctx.sock?.user?.id) || configStore.normalizeDigits(ctx.senderDigits);
+            const selfMap = { ...(cfg.selfArcChannels || {}) };
+            const sub = (ctx.args[0] || '').toLowerCase();
+
+            if (['del', 'delete', 'rm', 'remove'].includes(sub)) {
+                delete selfMap[botDigitsKey];
+                configStore.updateConfig({ selfArcChannels: selfMap });
+                return ctx.reply('🗑️ Aapka Self-Bot Auto-React channel remove kar diya gaya hai.');
+            }
+
+            if (['list', 'info', 'status', 'my'].includes(sub) || !ctx.args[0]) {
+                const cur = selfMap[botDigitsKey];
+                if (!cur) {
                     return ctx.reply(
-                        `ℹ️ *ARC List khali hai.*\n` +
-                        `Add: *${ctx.prefix}arc https://whatsapp.com/channel/CODE ❤️ 🔥 👍*\n` +
-                        `Ya: *${ctx.prefix}autoreact https://whatsapp.com/channel/CODE ❤️*`
+                        `📢 *SELF-BOT AUTO-REACT (.achr)*\n\n` +
+                        `• Set: *${ctx.prefix}achr <channel_link> ❤️ 🔥 👍*\n` +
+                        `• Delete: *${ctx.prefix}achr del*\n` +
+                        `_Is se sirf AAPKA apna bot channel posts par react karega!_`
                     );
                 }
                 return ctx.reply(
-                    `⚡ *CROSS-BOT AUTO CHANNEL REACTIONS (${entries.length}):*\n\n` +
-                    entries.map((c, i) => `${i + 1}. *${c.name}* (${c.enabled === false ? 'OFF' : 'ON'})\n   🆔 \`${c.jid}\` | 😊 ${(c.emojis || ['❤️']).join(' ')}`).join('\n') +
-                    `\n\nRemove: \`${ctx.prefix}arcdel <jid|num>\` | Toggle: \`${ctx.prefix}arc on/off\``
+                    `╭━━━〔 📢 *YOUR AUTO-REACT CHANNEL* 〕━━━┈⊷\n` +
+                    `┃ 📛 *Channel:* ${cur.name}\n` +
+                    `┃ 🆔 *JID:* \`${cur.jid}\`\n` +
+                    `┃ ✨ *Emojis:* ${(cur.emojis || ['❤️']).join(' ')}\n` +
+                    `┃ 🤖 *Mode:* Self-Bot Only (+${botDigitsKey})\n` +
+                    `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
                 );
             }
 
-            if (cmd === 'arcdel' || sub === 'del' || sub === 'delete' || sub === 'rm' || sub === 'remove') {
-                const targetArg = (cmd === 'arcdel' ? ctx.args[0] : ctx.args[1]) || '';
-                if (!targetArg) return ctx.reply(`Usage: *${ctx.prefix}arcdel <channel-link | @newsletter JID | number>*`);
-                const entries = Object.values(arcMap);
-                let targetJid = targetArg.trim();
-                if (/^\d+$/.test(targetJid) && Number(targetJid) >= 1 && Number(targetJid) <= entries.length) {
-                    targetJid = entries[Number(targetJid) - 1].jid;
-                } else if (!/^\d+@newsletter$/.test(targetJid)) {
-                    const resolved = await resolveChannelTarget(ctx.sock, targetArg, ctx.msg).catch(() => null);
-                    if (resolved?.jid) targetJid = resolved.jid;
-                }
-                if (!arcMap[targetJid]) {
-                    return ctx.reply(`❌ ARC list mein \`${targetArg}\` nahi mila.`);
-                }
-                const removedName = arcMap[targetJid].name || targetJid;
-                delete arcMap[targetJid];
-                configStore.updateConfig({ arcChannels: arcMap });
-                clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'del', jid: targetJid }).catch(() => {});
-                return ctx.reply(`🗑️ *${removedName}* ko Main + Mini Bot ARC list se delete kar diya!`);
-            }
+            const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '❤️ 🔥 👍');
+            const info = await resolveChannelWithClusterFallback(ctx, parsed.code ? `https://whatsapp.com/channel/${parsed.code}` : (parsed.jid || ctx.args[0]));
+            const jid = info?.jid || parsed.jid;
+            if (!jid) return ctx.reply('❌ Valid WhatsApp Channel link ya `@newsletter` JID dein!');
+            if (cfg.arcBlocked?.[jid]) return ctx.reply(`🚫 Channel \`${jid}\` blocked hai.`);
 
-            if (sub === 'on' || sub === 'off') {
-                const enabled = sub === 'on';
-                for (const key of Object.keys(arcMap)) {
-                    arcMap[key].enabled = enabled;
-                }
-                configStore.updateConfig({ arcChannels: arcMap });
-                if (enabled) await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
-                for (const key of Object.keys(arcMap)) {
-                    clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'toggle', jid: key, enabled }).catch(() => {});
-                }
-                return ctx.reply(`✅ Cross-Bot Channel Auto-React ab *${sub.toUpperCase()}* hai!`);
-            }
-
-            const rawArgs = sub === 'add' ? ctx.args.slice(1) : [...(ctx.args || [])];
-            const parsed = parseMiniChannelInput(rawArgs, ctx.msg, '❤️ 🔥 👍');
-            const lookupToken = parsed.code
-                ? `https://whatsapp.com/channel/${parsed.code}`
-                : (parsed.jid || rawArgs[0] || '');
-            const info = await resolveChannelTarget(ctx.sock, lookupToken, ctx.msg).catch(() => null);
-            let jid = info?.jid || parsed.jid;
-            if (!jid && parsed.code) {
-                const cRes = await clusterMesh.resolveFromClusters('resolve_channel', { code: parsed.code }, (d) => d?.jid && /^\d+@newsletter$/.test(d.jid));
-                if (cRes?.jid) jid = cRes.jid;
-            }
-            if (!jid) {
-                return ctx.reply(
-                    `📢 *CROSS-BOT AUTO CHANNEL REACT (.arc)*\n\n` +
-                    `• *${ctx.prefix}arc https://whatsapp.com/channel/CODE ❤️ 🔥 👍*\n` +
-                    `• *${ctx.prefix}arclist* | *${ctx.prefix}arcdel <link|num>*\n` +
-                    `• *${ctx.prefix}arc on* | *${ctx.prefix}arc off*\n\n` +
-                    `✨ _Is se add kiya channel Main Bot (50 servers) aur Mini Bot dono par auto-react karega!_`
-                );
-            }
-
-            const emojiTokens = String(parsed.extraText || '❤️ 🔥 👍').split(/[\s,]+/).filter(Boolean);
-            const emojis = emojiTokens.length ? emojiTokens : ['❤️', '🔥', '👍'];
+            const emojis = parseEmojiTokens(parsed.extraText, ['❤️', '🔥', '👍', '✨']);
             const entry = {
                 jid,
-                name: info?.name || parsed.name || 'WhatsApp Channel',
+                name: info?.name || 'WhatsApp Channel',
                 link: parsed.code ? `https://whatsapp.com/channel/${parsed.code}` : '',
-                invite: parsed.code || info?.inviteCode || '',
                 emojis,
                 enabled: true,
-                addedAt: Date.now()
+                updatedAt: Date.now()
             };
-            arcMap[jid] = entry;
-            configStore.updateConfig({ arcChannels: arcMap });
+            selfMap[botDigitsKey] = entry;
+            configStore.updateConfig({ selfArcChannels: selfMap });
             await ctx.sock.newsletterFollow?.(jid).catch(() => {});
-            await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
-            clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'add', channel: entry }).catch(() => {});
+            await ctx.sock.subscribeNewsletterUpdates?.(jid).catch(() => {});
             ctx.react('✅');
             return ctx.reply(
-                `✅ *CROSS-BOT AUTO CHANNEL REACT ACTIVE!*\n\n` +
-                `🎯 *Channel:* ${entry.name}\n` +
+                `✅ *SELF-BOT AUTO-REACT ACTIVE!*\n` +
+                `📛 *Channel:* ${entry.name}\n` +
                 `🆔 \`${entry.jid}\`\n` +
-                `😊 *Emojis:* ${emojis.join(' ')}\n` +
-                `🌐 *Synced Across:* Main Bot + Mini Bot (${getMeshCount()} Servers)`
+                `✨ *Emojis:* ${emojis.join(' ')}`
             );
+        }
+    },
+    {
+        name: 'chautojoin',
+        aliases: ['autojoin', 'chjoin'],
+        category: 'channel',
+        desc: 'Tamam connected sessions & servers se channel auto-join karein (.chautojoin <link>)',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
+            const raw = ctx.args[0] || '';
+            if (!raw) return ctx.reply(`Usage: *${ctx.prefix}chautojoin <whatsapp_channel_link>*`);
+            const info = await resolveChannelWithClusterFallback(ctx, raw);
+            if (!info?.jid) return ctx.reply('❌ Channel link resolve nahi ho saka!');
+
+            ctx.react('⏳');
+            const localSocks = typeof ctx.runtime?.getAllSocks === 'function' ? ctx.runtime.getAllSocks() : [ctx.sock];
+            let localOk = 0;
+            for (const s of localSocks) {
+                if (!s || typeof s.newsletterFollow !== 'function') continue;
+                try {
+                    await withTimeout(s.newsletterFollow(info.jid), 8000, 'chautojoin');
+                    await s.subscribeNewsletterUpdates?.(info.jid).catch(() => {});
+                    localOk++;
+                } catch (e) {
+                    if (/409|already|conflict|subscribed/i.test(String(e?.message || e))) localOk++;
+                }
+                if (localSocks.length > 1) await sleep(300);
+            }
+            clusterMesh.broadcastToAllClusters('chfollow', {
+                jid: info.jid,
+                code: info.inviteCode || null,
+                input: raw,
+                channelName: info.name
+            }).catch(() => {});
+            ctx.react('✅');
+            return ctx.reply(
+                `╭━━━〔 📢 *CHANNEL AUTO-JOIN COMPLETED* 〕━━━┈⊷\n` +
+                `┃ 🏷️ *Channel:* *${info.name}*\n` +
+                `┃ 🆔 *JID:* \`${info.jid}\`\n` +
+                `┃ 👥 *Local Sessions:* ${localOk}/${localSocks.length}\n` +
+                `┃ 🌐 *Cluster Mesh:* ${getMeshCount()} Server(s)\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+            );
+        }
+    },
+    {
+        name: 'getcid',
+        aliases: ['chcid'],
+        category: 'channel',
+        desc: 'Channel link se instant JID aur Metadata nikalein (.getcid <link>)',
+        handler: async (ctx) => {
+            const raw = ctx.args[0] || '';
+            const info = await resolveChannelWithClusterFallback(ctx, raw);
+            if (!info?.jid) {
+                return ctx.reply(`Usage: *${ctx.prefix}getcid https://whatsapp.com/channel/CODE*`);
+            }
+            return ctx.reply(
+                `╭━━━〔 📢 *CHANNEL METADATA* 〕━━━┈⊷\n` +
+                `┃ 🏷️ *Name:* ${info.name}\n` +
+                `┃ 🆔 *JID:* \`${info.jid}\`\n` +
+                (info.followers != null ? `┃ 👥 *Subscribers:* ${info.followers}\n` : '') +
+                (info.inviteCode ? `┃ 🔗 *Invite Code:* \`${info.inviteCode}\`\n` : '') +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+            );
+        }
+    },
+    {
+        name: 'chinspect',
+        aliases: ['inspect'],
+        category: 'channel',
+        desc: 'WhatsApp Channel ya Group invite link ko inspect karein (.chinspect <link>)',
+        handler: async (ctx) => {
+            const text = ctx.fullArgs || getTextFromContent(unwrapMessage(ctx.quotedMsg));
+            if (!text) {
+                return ctx.reply(`Usage: *${ctx.prefix}chinspect <channel-link ya group-invite-link>*`);
+            }
+            ctx.react('🔍');
+            if (/whatsapp\.com\/channel\//i.test(text) || /@newsletter/i.test(text)) {
+                const info = await resolveChannelTarget(ctx.sock, text, ctx.msg).catch(() => null);
+                if (!info) return ctx.reply('❌ Channel inspect nahi ho saka!');
+                return ctx.reply(
+                    `╭━━━〔 ⚡ *CHANNEL INSPECTION* ⚡ 〕━━━┈⊷\n` +
+                    `┃ 📢 *Name:* ${info.name}\n` +
+                    `┃ 🆔 *JID:* \`${info.jid}\`\n` +
+                    (info.followers != null ? `┃ 👥 *Subscribers:* ${info.followers}\n` : '') +
+                    (info.inviteCode ? `┃ 🔗 *Code:* \`${info.inviteCode}\`\n` : '') +
+                    (info.description ? `┃ 📝 *Bio:* ${info.description.slice(0, 260)}\n` : '') +
+                    `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+                );
+            }
+            const gMatch = text.match(/chat\.whatsapp\.com\/([0-9A-Za-z_-]{18,32})/i);
+            if (gMatch && typeof ctx.sock.groupGetInviteInfo === 'function') {
+                const g = await ctx.sock.groupGetInviteInfo(gMatch[1]).catch(() => null);
+                if (!g) return ctx.reply('❌ Group invite inspect nahi ho saka (expired ya invalid link).');
+                return ctx.reply(
+                    `╭━━━〔 ⚡ *GROUP INVITE INSPECTION* ⚡ 〕━━━┈⊷\n` +
+                    `┃ 🏷️ *Group:* ${g.subject || 'N/A'}\n` +
+                    `┃ 🆔 *JID:* \`${g.id || 'N/A'}\`\n` +
+                    `┃ 👥 *Members:* ${g.size ?? (g.participants || []).length ?? 'N/A'}\n` +
+                    (g.desc ? `┃ 📝 *Description:* ${String(g.desc).slice(0, 260)}\n` : '') +
+                    `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
+                );
+            }
+            return ctx.reply('❌ Valid WhatsApp Channel ya Group invite link dein!');
         }
     },
     {
@@ -1203,7 +1817,32 @@ const commands = [
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷`
             );
         }
+    },
+    {
+        name: 'pollvfix',
+        aliases: ['fixpoll', 'pollreset'],
+        category: 'channel',
+        desc: 'Poll aur channel resolver cache refresh karein',
+        handler: async (ctx) => {
+            const cleared = typeof clusterMesh.clearChannelResolveCache === 'function' ? clusterMesh.clearChannelResolveCache() : 0;
+            globalThis.miniPollVotingCancelled = false;
+            return ctx.reply(`🔧 *Poll cache & state refreshed!* (Cleared cached channel entries: ${cleared})`);
+        }
+    },
+    {
+        name: 'pollvstop',
+        aliases: ['stoppoll', 'pollstop'],
+        category: 'channel',
+        desc: 'Active poll voting process ko stop karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            globalThis.miniPollVotingCancelled = true;
+            return ctx.reply('🛑 *Poll voting process stopped!*');
+        }
     }
 ];
+
+const commands = [...commandsHead, ...channelCommandsTail];
 
 module.exports = commands;

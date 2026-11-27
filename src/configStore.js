@@ -62,6 +62,11 @@ function getDefaultConfig() {
         autoFollowChannels: [],
         autoJoinGroups: [],
         arcChannels: {},
+        arcEnabled: true,
+        arcLocked: false,
+        arcBlocked: {},
+        selfArcChannels: {},
+        channelForwarder: { enabled: true, targetJid: '', channelTargets: {} },
         miniClusterNodes: [],
         groups: {}
     };
@@ -109,6 +114,19 @@ function mergeWithDefaults(raw) {
         autoFollowChannels: Array.isArray(raw?.autoFollowChannels) ? raw.autoFollowChannels : [],
         autoJoinGroups: Array.isArray(raw?.autoJoinGroups) ? raw.autoJoinGroups : [],
         arcChannels: (raw?.arcChannels && typeof raw.arcChannels === 'object' && !Array.isArray(raw.arcChannels)) ? raw.arcChannels : {},
+        arcEnabled: raw?.arcEnabled !== false,
+        arcLocked: Boolean(raw?.arcLocked),
+        arcBlocked: (raw?.arcBlocked && typeof raw.arcBlocked === 'object' && !Array.isArray(raw.arcBlocked)) ? raw.arcBlocked : {},
+        selfArcChannels: (raw?.selfArcChannels && typeof raw.selfArcChannels === 'object' && !Array.isArray(raw.selfArcChannels)) ? raw.selfArcChannels : {},
+        channelForwarder: (raw?.channelForwarder && typeof raw.channelForwarder === 'object' && !Array.isArray(raw.channelForwarder))
+            ? {
+                enabled: raw.channelForwarder.enabled !== false,
+                targetJid: typeof raw.channelForwarder.targetJid === 'string' ? raw.channelForwarder.targetJid : '',
+                channelTargets: (raw.channelForwarder.channelTargets && typeof raw.channelForwarder.channelTargets === 'object' && !Array.isArray(raw.channelForwarder.channelTargets))
+                    ? raw.channelForwarder.channelTargets
+                    : {}
+            }
+            : { enabled: true, targetJid: '', channelTargets: {} },
         miniClusterNodes: Array.isArray(raw?.miniClusterNodes) ? raw.miniClusterNodes.filter(Boolean) : [],
         groups: (raw?.groups && typeof raw.groups === 'object') ? raw.groups : {}
     };

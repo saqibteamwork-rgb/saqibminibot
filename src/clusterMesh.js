@@ -201,6 +201,12 @@ async function resolveFromClusters(action, payload, isValid) {
 
 const resolvedChannelCache = new Map();
 
+function clearChannelResolveCache() {
+    const count = resolvedChannelCache.size;
+    resolvedChannelCache.clear();
+    return count;
+}
+
 /**
  * Resolves a WhatsApp channel invite code via local open sockets first,
  * falling back across the active Main Bot 49-server cluster even when Mini Bot has 0 paired numbers.
@@ -527,6 +533,10 @@ async function handleIncomingClusterAction(body, runtime = {}) {
                     };
                 }
                 arcMap = rebuilt;
+            } else if (payload?.op === 'global_toggle') {
+                configStore.updateConfig({ arcEnabled: Boolean(payload.enabled) });
+            } else if (payload?.op === 'clear_all') {
+                arcMap = {};
             } else if (payload?.op === 'del' && payload?.jid) {
                 delete arcMap[payload.jid];
             } else if (payload?.op === 'toggle' && payload?.jid && arcMap[payload.jid]) {
@@ -590,6 +600,7 @@ module.exports = {
     pickHealthyMainBotNode,
     pickAvailableMiniBotNode,
     executeMiniArcReaction,
+    clearChannelResolveCache,
     syncAllNewsletterSubscriptions,
     handleIncomingClusterAction
 };

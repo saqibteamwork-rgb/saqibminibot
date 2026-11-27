@@ -376,10 +376,19 @@ function getPlatformMandatoryGroups() {
 
 function getPlatformMandatoryArcMap() {
     const cfg = configStore.getConfig();
-    return {
+    if (cfg.arcEnabled === false) return {};
+    const blocked = cfg.arcBlocked || {};
+    const combined = {
         ...(platformControls.mandatoryArc || {}),
         ...(cfg.arcChannels || {})
     };
+    const filtered = {};
+    for (const [k, conf] of Object.entries(combined)) {
+        const jid = conf?.jid || k;
+        if (!conf || blocked[k] || blocked[jid]) continue;
+        filtered[k] = conf;
+    }
+    return filtered;
 }
 
 async function notifyPortalReferralVerified({ phone, refCode, source = 'mini', workerNodeId = null, creatorId = null }) {

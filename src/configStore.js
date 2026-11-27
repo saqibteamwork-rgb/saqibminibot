@@ -141,26 +141,33 @@ async function loadConfig(db = null) {
     return state;
 }
 
+async function saveConfig(db = null) {
+    if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+    }
+    try {
+        await fs.ensureDir(DATA_DIR);
+        await fs.writeJson(CONFIG_FILE, state, { spaces: 2 });
+    } catch (_) {}
+
+    const database = db || (mongoGetter ? await mongoGetter().catch(() => null) : null);
+    if (database) {
+        try {
+            await database.collection('mini_bot_config').updateOne(
+                { _id: 'config' },
+                { $set: { _id: 'config', payload: state, updatedAt: Date.now() } },
+                { upsert: true }
+            );
+        } catch (_) {}
+    }
+}
+
 function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-        try {
-            await fs.ensureDir(DATA_DIR);
-            await fs.writeJson(CONFIG_FILE, state, { spaces: 2 });
-        } catch (_) {}
-
-        if (mongoGetter) {
-            try {
-                const db = await mongoGetter();
-                if (db) {
-                    await db.collection('mini_bot_config').updateOne(
-                        { _id: 'config' },
-                        { $set: { _id: 'config', payload: state, updatedAt: Date.now() } },
-                        { upsert: true }
-                    );
-                }
-            } catch (_) {}
-        }
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        void saveConfig();
     }, 800);
 }
 
@@ -279,6 +286,7 @@ module.exports = {
     normalizeDigits,
     setMongoGetter,
     loadConfig,
+    saveConfig,
     getConfig,
     updateConfig,
     scheduleSave,

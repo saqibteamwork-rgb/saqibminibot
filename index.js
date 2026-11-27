@@ -1760,10 +1760,10 @@ app.listen(PORT, async () => {
     console.log(`======================================================\n`);
 
     try {
-        // Give old dyno 3.5s on Heroku deploy to run its SIGTERM flush & release sockets cleanly (prevents Code 440 wars!)
+        // Give old dyno 4.5s on Heroku deploy to close sockets & flush Mongo backup cleanly (prevents Code 440 wars!)
         if (process.env.DYNO) {
-            console.log('⏳ [Boot Handoff] Waiting 3.5s for previous dyno shutdown flush before connecting...');
-            await sleep(3500);
+            console.log('⏳ [Boot Handoff] Waiting 4.5s for previous dyno shutdown flush before connecting...');
+            await sleep(4500);
         }
         if (isServerShuttingDown) return;
 
@@ -1818,15 +1818,14 @@ async function handleGracefulShutdown(signal) {
                 clearTimeout(s.reconnectTimer);
                 s.reconnectTimer = null;
             }
-        }
-        await Promise.allSettled([
-            configStore.saveConfig ? configStore.saveConfig(mongoDb).catch(() => {}) : Promise.resolve(),
-            backupAllValidSessionsToMongo(true)
-        ]);
-        for (const s of sessions.values()) {
             cleanupSessionSocket(s);
         }
-        console.log('✅ [Shutdown] All sessions synced to MongoDB & sockets closed.');
+        await sleep(250);
+        await Promise.allSettled([
+            configStore.saveConfig(mongoDb).catch(() => {}),
+            backupAllValidSessionsToMongo(true)
+        ]);
+        console.log('✅ [Shutdown] Sockets closed first & all sessions synced to MongoDB.');
     } catch (e) {
         console.error('⚠️ [Shutdown Error]:', e?.message || e);
     }

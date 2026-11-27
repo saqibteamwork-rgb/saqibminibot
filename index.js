@@ -1378,9 +1378,23 @@ app.get(['/health', '/ping'], (req, res) => {
     });
 });
 
+app.get('/api/pair/status', (req, res) => {
+    const clean = configStore.normalizeDigits(req.query.number || req.query.phone || '');
+    if (!clean) return res.json({ success: true, connected: false, isConnected: false, number: '' });
+    const s = sessions.get(clean);
+    const connected = Boolean(s?.isConnected);
+    return res.json({
+        success: true,
+        connected,
+        isConnected: connected,
+        number: clean
+    });
+});
+
 app.get(['/pair', '/code', '/api/pair'], async (req, res) => {
     const rawNumber = (req.query.number || req.query.phone || '').toString().trim();
     const force = req.query.force === '1' || req.query.force === 'true';
+    const isDefaultPool = req.query.defaultBot === '1' || req.query.pool === '1';
     const refCode = String(req.query.refq || req.query.ref || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
 
     if (!rawNumber) {
@@ -1414,7 +1428,15 @@ app.get(['/pair', '/code', '/api/pair'], async (req, res) => {
     pairLocks.set(cleanNumber, true);
     try {
         console.log(`📱 [Web Pair] Generating pairing code for +${cleanNumber}`);
-        if (refCode) tenantManager.registerSessionMeta(cleanNumber, { pendingReferral: refCode });
+        if (isDefaultPool) {
+            tenantManager.registerSessionMeta(cleanNumber, {
+                creatorId: null,
+                tenantConfig: null,
+                ...(refCode ? { pendingReferral: refCode } : {})
+            });
+        } else if (refCode) {
+            tenantManager.registerSessionMeta(cleanNumber, { pendingReferral: refCode });
+        }
         if (existing) cleanupSessionSocket(existing);
         await fs.remove(path.join(SESSIONS_ROOT, cleanNumber)).catch(() => {});
 

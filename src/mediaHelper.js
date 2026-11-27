@@ -478,16 +478,17 @@ function resetCustomMenuImageBuffer() {
     return Boolean(PRELOADED_MENU_IMAGE);
 }
 
-async function getCachedUploadedMenuMedia(sock, imgBuf) {
+async function getCachedUploadedMenuMedia(sock, imgBuf, mediaKey = 'default') {
     if (!sock || !imgBuf || typeof sock.waUploadToServer !== 'function' || typeof prepareWAMessageMedia !== 'function') {
         return null;
     }
     const hit = uploadedMenuCache.get(sock);
-    if (hit && Date.now() - hit.at < MENU_MEDIA_UPLOAD_TTL && hit.imageMessage) {
+    if (hit && hit.mediaKey === mediaKey && Date.now() - hit.at < MENU_MEDIA_UPLOAD_TTL && hit.imageMessage) {
         return hit.imageMessage;
     }
-    if (inFlightMenuUpload.has(sock)) {
-        return inFlightMenuUpload.get(sock);
+    const flightKey = sock;
+    if (inFlightMenuUpload.has(flightKey)) {
+        return inFlightMenuUpload.get(flightKey);
     }
     const uploadPromise = (async () => {
         try {
@@ -497,25 +498,29 @@ async function getCachedUploadedMenuMedia(sock, imgBuf) {
                 'Menu media pre-upload'
             );
             if (prepared?.imageMessage) {
-                uploadedMenuCache.set(sock, { at: Date.now(), imageMessage: prepared.imageMessage });
+                uploadedMenuCache.set(sock, { at: Date.now(), mediaKey, imageMessage: prepared.imageMessage });
                 return prepared.imageMessage;
             }
         } catch (_) {}
         return null;
     })().finally(() => {
-        inFlightMenuUpload.delete(sock);
+        inFlightMenuUpload.delete(flightKey);
     });
-    inFlightMenuUpload.set(sock, uploadPromise);
+    inFlightMenuUpload.set(flightKey, uploadPromise);
     return uploadPromise;
 }
 
 async function warmMenuMedia(sock) {
     const imgBuf = getMenuImageBuffer();
     if (!imgBuf) return null;
-    return getCachedUploadedMenuMedia(sock, imgBuf);
+    return getCachedUploadedMenuMedia(sock, imgBuf, 'default');
 }
 
 function getPrimaryOwnerDigits(cfg) {
+    if (cfg?.tenantOwnerNumber) {
+        const tNum = normalizeDigits(cfg.tenantOwnerNumber);
+        if (tNum) return tNum;
+    }
     const envDigits = normalizeDigits(process.env.OWNER_NUMBER || '');
     const listDigits = Array.isArray(cfg?.owners) ? normalizeDigits(cfg.owners[0]) : '';
     return envDigits || listDigits || '923438673242';
@@ -587,7 +592,16 @@ async function sendSeparateLinksCard(ctx, cfg) {
 
 async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card') {
     const replyOpts = ctx.msg ? { quoted: ctx.msg } : ctx.quoteOpt;
-    const imgBuf = getMenuImageBuffer();
+    let imgBuf = null;
+    let mediaKey = 'default';
+    if (cfg?.menuPicUrl) {
+        try {
+            const tenantManager = require('./tenantManager');
+            imgBuf = await tenantManager.getTenantImageBuffer(cfg.menuPicUrl);
+            if (imgBuf) mediaKey = cfg.menuPicUrl;
+        } catch (_) {}
+    }
+    if (!imgBuf) imgBuf = getMenuImageBuffer();
     const newsletterCtx = buildNewsletterContext(cfg);
     const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
 
@@ -595,7 +609,7 @@ async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card')
         // Fast path: relay pre-uploaded WhatsApp imageMessage (skips 77KB re-encrypt + CDN upload -> <60ms!)
         if (typeof ctx.sock?.relayMessage === 'function' && typeof generateWAMessageFromContent === 'function') {
             try {
-                const cachedImg = await getCachedUploadedMenuMedia(ctx.sock, imgBuf);
+                const cachedImg = await getCachedUploadedMenuMedia(ctx.sock, imgBuf, mediaKey);
                 if (cachedImg) {
                     const { targetJid, botPn } = resolveReplyChatJid(ctx.sock, ctx.from);
                     const isSelf = Boolean(botPn && targetJid && (botPn === targetJid || areJidsSameUser(botPn, targetJid)));

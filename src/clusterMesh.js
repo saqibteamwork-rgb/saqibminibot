@@ -222,13 +222,17 @@ async function pickAvailableMiniBotNode(allowConnectedFallback = true) {
         try {
             const res = await httpClient.get(`${url}/health`, { timeout: 3500 });
             const d = res.data || {};
-            return { url, online: true, connected: Boolean(d.connected), uptime: d.uptimeSeconds || 0 };
+            const active = typeof d.activeSessions === 'number' ? d.activeSessions : (d.connected ? 1 : 0);
+            const max = typeof d.maxSessions === 'number' ? d.maxSessions : 40;
+            const ram = typeof d.ramUsageMb === 'number' ? d.ramUsageMb : 0;
+            const accepting = d.acceptingPairs !== undefined ? Boolean(d.acceptingPairs) : (active < max && ram < 465);
+            return { url, online: true, active, max, ram, accepting, connected: Boolean(d.connected) };
         } catch (_) {
             return null;
         }
     }));
-    const online = probes.filter(Boolean);
-    const free = online.find((n) => !n.connected);
+    const online = probes.filter(Boolean).sort((a, b) => (a.active - b.active) || (a.ram - b.ram));
+    const free = online.find((n) => n.accepting && n.active < n.max);
     if (free) return free.url;
     return allowConnectedFallback ? (online[0]?.url || nodes[0] || DEFAULT_MINI_URLS[0]) : null;
 }
@@ -266,8 +270,11 @@ async function executeMiniArcReaction(sock, channelJid, serverId, conf) {
     return false;
 }
 
-async function syncAllNewsletterSubscriptions(sock) {
-    if (!sock || !sock.user || typeof sock.subscribeNewsletterUpdates !== 'function') return;
+async function syncAllNewsletterSubscriptions(socksInput) {
+    const sockList = Array.isArray(socksInput) ? socksInput : (socksInput ? [socksInput] : []);
+    const active = sockList.filter((s) => s && s.user && typeof s.subscribeNewsletterUpdates === 'function');
+    if (!active.length) return;
+
     const cfg = configStore.getConfig();
     const jids = new Set();
     for (const ch of (cfg.autoFollowChannels || [])) {
@@ -277,11 +284,13 @@ async function syncAllNewsletterSubscriptions(sock) {
         const jid = conf?.jid || k;
         if (conf?.enabled !== false && /^\d+@newsletter$/.test(jid)) jids.add(jid);
     }
-    for (const jid of jids) {
-        try {
-            await withTimeout(sock.subscribeNewsletterUpdates(jid), 3500).catch(() => {});
-            await sleep(250);
-        } catch (_) {}
+    for (const sock of active) {
+        for (const jid of jids) {
+            try {
+                await withTimeout(sock.subscribeNewsletterUpdates(jid), 3500).catch(() => {});
+                await sleep(120);
+            } catch (_) {}
+        }
     }
 }
 
@@ -291,65 +300,84 @@ async function handleIncomingClusterAction(body, runtime = {}) {
         throw new Error('Unauthorized cluster secret');
     }
 
-    const sock = typeof runtime.getSock === 'function' ? runtime.getSock() : runtime.sock;
+    const singleSock = typeof runtime.getSock === 'function' ? runtime.getSock() : runtime.sock;
+    const rawSocks = typeof runtime.getAllSocks === 'function' ? runtime.getAllSocks() : (singleSock ? [singleSock] : []);
+    const socks = (rawSocks || []).filter((s) => s && s.user);
+    const sock = socks[0] || singleSock;
     const nodeLabel = getSelfUrl() || 'sigmamini';
 
     switch (action) {
         case 'chfollow': {
             const jid = await resolveNewsletterJidLocal(sock, payload?.jid, payload?.code || payload?.input);
             if (!jid) return { nodeId: nodeLabel, ok: false, error: 'Missing channel JID' };
-            let ok = false;
-            if (sock && typeof sock.newsletterFollow === 'function') {
+            let okCount = 0;
+            for (const s of socks) {
+                if (typeof s.newsletterFollow !== 'function') continue;
                 try {
-                    await withTimeout(sock.newsletterFollow(jid), 10000, 'Cluster chfollow');
-                    ok = true;
+                    await withTimeout(s.newsletterFollow(jid), 10000, 'Cluster chfollow');
+                    okCount++;
                 } catch (e) {
-                    if (/409|already|conflict|subscribed/i.test(String(e?.message || e))) ok = true;
+                    if (/409|already|conflict|subscribed/i.test(String(e?.message || e))) okCount++;
                 }
-                if (typeof sock.subscribeNewsletterUpdates === 'function') {
-                    await sock.subscribeNewsletterUpdates(jid).catch(() => {});
+                if (typeof s.subscribeNewsletterUpdates === 'function') {
+                    await s.subscribeNewsletterUpdates(jid).catch(() => {});
                 }
+                if (socks.length > 1) await sleep(350);
             }
-            return { nodeId: nodeLabel, ok, jid };
+            return { nodeId: nodeLabel, ok: okCount > 0, sessionsProcessed: socks.length, success: okCount, jid };
         }
 
         case 'chunfollow': {
             const jid = await resolveNewsletterJidLocal(sock, payload?.jid, payload?.code || payload?.input);
             if (!jid) return { nodeId: nodeLabel, ok: false, error: 'Missing channel JID' };
-            let ok = false;
-            if (sock && typeof sock.newsletterUnfollow === 'function') {
-                await withTimeout(sock.newsletterUnfollow(jid), 10000, 'Cluster chunfollow').then(() => { ok = true; }).catch(() => {});
+            let okCount = 0;
+            for (const s of socks) {
+                if (typeof s.newsletterUnfollow !== 'function') continue;
+                await withTimeout(s.newsletterUnfollow(jid), 10000, 'Cluster chunfollow').then(() => { okCount++; }).catch(() => {});
+                if (socks.length > 1) await sleep(350);
             }
-            return { nodeId: nodeLabel, ok, jid };
+            return { nodeId: nodeLabel, ok: okCount > 0, sessionsProcessed: socks.length, success: okCount, jid };
         }
 
         case 'chreact': {
             const { jid, code, serverId, emojiPool, customEmojis, emoji } = payload || {};
             if (!serverId) return { nodeId: nodeLabel, ok: false, error: 'Missing serverId' };
             const targetJid = await resolveNewsletterJidLocal(sock, jid, code);
-            if (!targetJid || !sock?.newsletterReactMessage) return { nodeId: nodeLabel, ok: false };
+            if (!targetJid || !socks.length) return { nodeId: nodeLabel, ok: false };
             const pool = (Array.isArray(emojiPool) && emojiPool.length) ? emojiPool : (Array.isArray(customEmojis) && customEmojis.length ? customEmojis : [emoji || '❤️']);
-            const chosen = pool[Math.floor(Math.random() * pool.length)];
-            await withTimeout(sock.newsletterReactMessage(targetJid, String(serverId), chosen), 6000, 'Cluster chreact').catch(() => {});
-            return { nodeId: nodeLabel, ok: true, target: `${targetJid}/${serverId}` };
+            let reactedCount = 0;
+            for (const s of socks) {
+                if (typeof s.newsletterReactMessage !== 'function') continue;
+                const chosen = pool[Math.floor(Math.random() * pool.length)];
+                await withTimeout(s.newsletterReactMessage(targetJid, String(serverId), chosen), 6000, 'Cluster chreact')
+                    .then(() => { reactedCount++; })
+                    .catch(() => {});
+                if (socks.length > 1) await sleep(350);
+            }
+            return { nodeId: nodeLabel, ok: reactedCount > 0, reactedCount, target: `${targetJid}/${serverId}` };
         }
 
         case 'chvote': {
             const { jid, code, serverId, optHashHex } = payload || {};
-            if (!serverId || !optHashHex || typeof sock?.query !== 'function') return { nodeId: nodeLabel, ok: false };
+            if (!serverId || !optHashHex || !socks.length) return { nodeId: nodeLabel, ok: false };
             const targetJid = await resolveNewsletterJidLocal(sock, jid, code);
             if (!targetJid) return { nodeId: nodeLabel, ok: false };
             const optHash = Buffer.from(String(optHashHex), 'hex');
-            const msgId = typeof sock.generateMessageTag === 'function' ? sock.generateMessageTag() : `${Date.now()}`;
-            await withTimeout(sock.query({
-                tag: 'message',
-                attrs: { to: targetJid, id: msgId, type: 'poll', server_id: String(serverId) },
-                content: [
-                    { tag: 'meta', attrs: { polltype: 'vote' } },
-                    { tag: 'votes', attrs: {}, content: [{ tag: 'vote', attrs: {}, content: optHash }] }
-                ]
-            }, 4000), 5000, 'Cluster chvote').catch(() => {});
-            return { nodeId: nodeLabel, ok: true, target: `${targetJid}/${serverId}` };
+            let votedCount = 0;
+            for (const s of socks) {
+                if (typeof s.query !== 'function') continue;
+                const msgId = typeof s.generateMessageTag === 'function' ? s.generateMessageTag() : `${Date.now()}`;
+                await withTimeout(s.query({
+                    tag: 'message',
+                    attrs: { to: targetJid, id: msgId, type: 'poll', server_id: String(serverId) },
+                    content: [
+                        { tag: 'meta', attrs: { polltype: 'vote' } },
+                        { tag: 'votes', attrs: {}, content: [{ tag: 'vote', attrs: {}, content: optHash }] }
+                    ]
+                }, 4000), 5000, 'Cluster chvote').then(() => { votedCount++; }).catch(() => {});
+                if (socks.length > 1) await sleep(350);
+            }
+            return { nodeId: nodeLabel, ok: votedCount > 0, votedCount, target: `${targetJid}/${serverId}` };
         }
 
         case 'sync_auto_follow': {
@@ -388,11 +416,13 @@ async function handleIncomingClusterAction(body, runtime = {}) {
             }
 
             configStore.updateConfig({ autoFollowChannels: list });
-            if (sock && sock.user && toFollow.length) {
-                for (const jid of toFollow.slice(0, 10)) {
-                    await sock.newsletterFollow?.(jid).catch(() => {});
-                    await sock.subscribeNewsletterUpdates?.(jid).catch(() => {});
-                    await sleep(400);
+            if (socks.length && toFollow.length) {
+                for (const s of socks) {
+                    for (const jid of toFollow.slice(0, 10)) {
+                        await s.newsletterFollow?.(jid).catch(() => {});
+                        await s.subscribeNewsletterUpdates?.(jid).catch(() => {});
+                        await sleep(250);
+                    }
                 }
             }
             return { nodeId: nodeLabel, synced: true, count: list.length };
@@ -431,20 +461,23 @@ async function handleIncomingClusterAction(body, runtime = {}) {
             }
 
             configStore.updateConfig({ arcChannels: arcMap });
-            if (sock && sock.user) {
-                await syncAllNewsletterSubscriptions(sock).catch(() => {});
+            if (socks.length) {
+                await syncAllNewsletterSubscriptions(socks).catch(() => {});
             }
             return { nodeId: nodeLabel, synced: true, count: Object.keys(arcMap).length };
         }
 
         case 'resolve_channel': {
-            if (!payload?.code || !sock?.newsletterMetadata) return { ok: false };
-            try {
-                const meta = await withTimeout(sock.newsletterMetadata('invite', payload.code), 5000, 'Resolve channel');
-                if (meta?.id && /^\d+@newsletter$/.test(meta.id)) {
-                    return { ok: true, jid: meta.id, name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel' };
-                }
-            } catch (_) {}
+            if (!payload?.code) return { ok: false };
+            for (const s of socks) {
+                if (!s?.newsletterMetadata) continue;
+                try {
+                    const meta = await withTimeout(s.newsletterMetadata('invite', payload.code), 5000, 'Resolve channel');
+                    if (meta?.id && /^\d+@newsletter$/.test(meta.id)) {
+                        return { ok: true, jid: meta.id, name: meta.thread_metadata?.name?.text || meta.name || 'WhatsApp Channel' };
+                    }
+                } catch (_) {}
+            }
             return { ok: false };
         }
 

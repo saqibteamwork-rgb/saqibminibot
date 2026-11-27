@@ -152,7 +152,7 @@ async function requestMiniBotPair(number, allowForce = false) {
 }
 
 async function sendCrossPairSuccess(ctx, number, rawCode, opts) {
-    const cfg = configStore.getConfig();
+    const cfg = ctx.tenantConfig || configStore.getConfig();
     const newsletterCtx = buildNewsletterContext(cfg);
     const cleanCode = String(rawCode).replace(/[^A-Za-z0-9]/g, '');
     const formattedCode = String(rawCode).includes('-') ? String(rawCode) : (cleanCode.match(/.{1,4}/g)?.join('-') || cleanCode);
@@ -171,10 +171,10 @@ async function sendCrossPairSuccess(ctx, number, rawCode, opts) {
         `🌐 *Web Dashboard:* ${opts.webUrl}\n` +
         `📋 *Neeche wala code 1-tap copy karein* 👇`;
 
-    // Card 1 includes the "View channel" context pill; Card 2 stays pure code for 1-tap copy
+    // Card 1 includes the "View channel" context pill; Card 2 stays pure clean code (skipChannelCard: true)
     const cardPayload = newsletterCtx ? { text: msgText, contextInfo: newsletterCtx } : { text: msgText };
     await ctx.sock.sendMessage(ctx.from, cardPayload, ctx.quoteOpt);
-    await ctx.sock.sendMessage(ctx.from, { text: cleanCode }, ctx.quoteOpt);
+    await ctx.sock.sendMessage(ctx.from, { text: cleanCode, skipChannelCard: true }, ctx.quoteOpt);
 }
 
 function toSansItalic(str) {
@@ -213,7 +213,7 @@ function makeBox(title, cmds, prefix) {
 }
 
 function buildMenuHeader(ctx, displayedCommands) {
-    const cfg = configStore.getConfig();
+    const cfg = ctx.tenantConfig || configStore.getConfig();
     const botName = cfg.botName || 'SIGMA MD';
     const ownerName = cfg.ownerName || 'MR SAQIB';
     const userName = String(ctx.msg?.pushName || ctx.senderDigits || 'User').replace(/[*_~`]/g, '').trim().slice(0, 40) || 'User';
@@ -251,7 +251,7 @@ function buildMenuHeader(ctx, displayedCommands) {
 }
 
 async function sendStyledMenu(ctx, sections, headerCommandCount) {
-    const cfg = configStore.getConfig();
+    const cfg = ctx.tenantConfig || configStore.getConfig();
     const headerText = buildMenuHeader(ctx, headerCommandCount);
     const boxesText = sections
         .map((sec) => {
@@ -315,7 +315,7 @@ const commands = [
         desc: 'Bot profile, developer info aur Mini/Main Bot Pair links dekhein',
         handler: async (ctx) => {
             ctx.react('👑');
-            const cfg = configStore.getConfig();
+            const cfg = ctx.tenantConfig || configStore.getConfig();
             const botName = cfg.botName || 'SIGMA MD';
             const ownerName = cfg.ownerName || 'MR SAQIB';
             const ownerDigits = getPrimaryOwnerDigits(cfg);
@@ -357,7 +357,7 @@ const commands = [
         handler: async (ctx) => {
             const rawLatency = Date.now() - ctx.msgTime;
             const latency = rawLatency > 0 && rawLatency < 60000 ? rawLatency : 18;
-            const cfg = configStore.getConfig();
+            const cfg = ctx.tenantConfig || configStore.getConfig();
             const botName = cfg.botName || 'SIGMA MD';
             await ctx.reply(
                 `⚡ *PONG! ${toSansBold(botName)} IS ALIVE!*\n\n` +
@@ -375,7 +375,7 @@ const commands = [
         category: 'core',
         desc: 'Bot 24/7 active status check karein',
         handler: async (ctx) => {
-            const cfg = configStore.getConfig();
+            const cfg = ctx.tenantConfig || configStore.getConfig();
             const botName = cfg.botName || 'SIGMA MD';
             await ctx.reply(
                 `🟢 *${toSansBold(botName)} IS 100% ONLINE!*\n\n` +
@@ -420,7 +420,7 @@ const commands = [
         category: 'core',
         desc: 'Bot version, Baileys engine aur config status dekhein',
         handler: async (ctx) => {
-            const cfg = configStore.getConfig();
+            const cfg = ctx.tenantConfig || configStore.getConfig();
             await ctx.reply(
                 `🤖 *${cfg.botName} — SYSTEM INFO*\n\n` +
                 `• *Owner:* ${cfg.ownerName}\n` +

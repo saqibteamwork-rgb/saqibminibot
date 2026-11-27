@@ -35,6 +35,18 @@ async function denyNonOwner(ctx) {
     );
 }
 
+function isPlatformMaster(ctx) {
+    if (ctx.isMasterOwner === true) return true;
+    if (ctx.tenantConfig?.creatorId) return false;
+    return Boolean(ctx.isOwner);
+}
+
+async function denyTenantGlobalEdit(ctx) {
+    const u = ctx.tenantConfig?.username;
+    const panelHint = u ? `\n🌐 Admin Panel: https://minibot.site/admin${u}` : '';
+    return await ctx.reply(`🔒 *Hosted Bot Guard:* Apna Bot Name, DP ya Channel change karne ke liye Web Admin Dashboard use karein.${panelHint}`);
+}
+
 async function resolveDigitsFromArgsOrQuote(ctx) {
     const { sock, msg, args, content, groupMeta } = ctx;
     const jid = extractTargetJid(msg, args, content, groupMeta);
@@ -54,7 +66,7 @@ const commands = [
         ownerOnly: false,
         handler: async (ctx) => {
             ctx.react('👑');
-            const cfg = configStore.getConfig();
+            const cfg = ctx.tenantConfig || configStore.getConfig();
             const botName = cfg.botName || 'SIGMA MD';
             const ownerName = cfg.ownerName || 'MR SAQIB';
             const ownerDigits = getPrimaryOwnerDigits(cfg);
@@ -107,6 +119,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyTenantGlobalEdit(ctx);
             const target = (ctx.args[0] || '').toLowerCase();
             if (!['public', 'private', 'self'].includes(target)) {
                 return ctx.reply(`⚙️ *Current Mode:* ${configStore.getConfig().mode.toUpperCase()}\n\nUsage: *${ctx.prefix}mode public* | *private* | *self*`);
@@ -164,6 +177,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyTenantGlobalEdit(ctx);
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}setbotname MY SUPER BOT*`);
             configStore.updateConfig({ botName: ctx.fullArgs.slice(0, 50) });
             await ctx.reply(`✅ Bot Name update ho kar *${configStore.getConfig().botName}* ho gaya!`);
@@ -177,6 +191,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyTenantGlobalEdit(ctx);
             if (!ctx.fullArgs) return ctx.reply(`Usage: *${ctx.prefix}setownername MR SAQIB*`);
             configStore.updateConfig({ ownerName: ctx.fullArgs.slice(0, 50) });
             await ctx.reply(`✅ Owner Name update ho kar *${configStore.getConfig().ownerName}* ho gaya!`);
@@ -190,6 +205,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyNonOwner(ctx);
             const target = await resolveDigitsFromArgsOrQuote(ctx);
             if (!target?.digits) return ctx.reply(`Usage: *${ctx.prefix}addowner 923001234567* ya kisi message par reply karein.`);
             const added = configStore.addOwner(target.digits);
@@ -204,6 +220,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyNonOwner(ctx);
             const target = await resolveDigitsFromArgsOrQuote(ctx);
             if (!target?.digits) return ctx.reply(`Usage: *${ctx.prefix}delowner 923001234567*`);
             const removed = configStore.removeOwner(target.digits);
@@ -514,6 +531,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyTenantGlobalEdit(ctx);
             const media = await extractMedia(ctx.quotedMsg || ctx.content);
             if (!media || media.mediaType !== 'image') {
                 return ctx.reply(`❌ Kisi image par reply karke *${ctx.prefix}setmenupic* likhein.`);
@@ -530,6 +548,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyTenantGlobalEdit(ctx);
             const hadCustom = hasCustomMenuImage();
             const ok = resetCustomMenuImageBuffer();
             await ctx.reply(ok
@@ -592,7 +611,7 @@ const commands = [
         desc: '40-Server Mini Bot cluster nodes dekhein, add ya remove karein',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!isPlatformMaster(ctx)) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || 'list').toLowerCase();
             const rawUrl = (ctx.args[1] || '').trim();
 

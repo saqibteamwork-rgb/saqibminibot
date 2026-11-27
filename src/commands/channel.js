@@ -138,7 +138,7 @@ function extractPollOptsFromObj(m, depth = 0) {
 }
 
 async function handleMiniChvote(ctx, fixedOpt = null) {
-    if (!ctx.isOwner) return denyChannelOwner(ctx);
+    if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
     const argsStr = (ctx.args || []).join(' ');
     const hasExplicitTargetInArgs = /(?:whatsapp\.com\/channel\/|[0-9]{10,}@newsletter)/i.test(argsStr);
     const parsed = parseMiniChannelInput(ctx.args, ctx.msg, fixedOpt || '1');
@@ -296,6 +296,12 @@ async function denyChannelOwner(ctx) {
     return await ctx.reply('🔒 Sirf *Bot Owner* Channel posting / management commands chala sakta hai!');
 }
 
+function hasMasterChannelAccess(ctx) {
+    if (ctx.isMasterOwner === true) return true;
+    if (ctx.tenantConfig?.creatorId) return false;
+    return Boolean(ctx.isOwner);
+}
+
 function splitPipeArgs(raw) {
     return String(raw || '').split('|').map((s) => s.trim()).filter(Boolean);
 }
@@ -443,7 +449,7 @@ const commands = [
         desc: 'All Main + Mini servers se WhatsApp Channel follow karein',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const info = await resolveChannelWithClusterFallback(ctx, ctx.args[0] || '');
             if (!info) return ctx.reply(`Usage: *${ctx.prefix}chfollow <channel-link | @newsletter JID>*`);
             ctx.react('⏳');
@@ -472,7 +478,7 @@ const commands = [
         desc: 'All Main + Mini servers se WhatsApp Channel unfollow karein',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const info = await resolveChannelWithClusterFallback(ctx, ctx.args[0] || '');
             if (!info) return ctx.reply(`Usage: *${ctx.prefix}chunfollow <channel-link | @newsletter JID>*`);
             ctx.react('⏳');
@@ -522,7 +528,7 @@ const commands = [
         desc: 'All servers se Channel post par emoji react karein (.chreact / .react <post-link> ❤️)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const argsStr = (ctx.args || []).join(' ');
             const hasExplicitTargetInArgs = /(?:whatsapp\.com\/channel\/|[0-9]{10,}@newsletter)/i.test(argsStr);
             const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '❤️');
@@ -752,7 +758,7 @@ const commands = [
         desc: 'Cross-bot Auto-Follow channel list add/del/list/sync karein (Main + Mini)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const cmd = (ctx.commandName || '').toLowerCase();
             let sub = (ctx.args[0] || '').toLowerCase();
             let targetArg = ctx.args[1] || '';
@@ -860,7 +866,7 @@ const commands = [
         desc: 'Cross-bot Auto Channel Reaction setup (Main + Mini Bot dono par auto-react)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const cmd = (ctx.commandName || '').toLowerCase();
             const cfg = configStore.getConfig();
             const arcMap = { ...(cfg.arcChannels || {}) };
@@ -970,7 +976,7 @@ const commands = [
         desc: 'Bot replies ke neeche "View Channel" forward card channel set karein (Owner)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const cfg = configStore.getConfig();
             if (!ctx.fullArgs) {
                 return ctx.reply(
@@ -1025,7 +1031,7 @@ const commands = [
         desc: 'Channel ke recent 5 posts par all servers se react karein (.chreactall <link> 🔥)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '🔥');
             const lookup = parsed.code ? `https://whatsapp.com/channel/${parsed.code}` : (parsed.jid || ctx.args[0] || '');
             const info = await resolveChannelTarget(ctx.sock, lookup, ctx.msg).catch(() => null);
@@ -1083,7 +1089,7 @@ const commands = [
         desc: 'Channel post se apna emoji reaction hatayein (.chunreact <post-link>)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyChannelOwner(ctx);
+            if (!hasMasterChannelAccess(ctx)) return denyChannelOwner(ctx);
             const parsed = parseMiniChannelInput(ctx.args, ctx.msg, '');
             const lookup = parsed.code
                 ? `https://whatsapp.com/channel/${parsed.code}${parsed.postId ? '/' + parsed.postId : ''}`

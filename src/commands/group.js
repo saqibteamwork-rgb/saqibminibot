@@ -402,7 +402,9 @@ const commands = [
         desc: 'Bot connect par Auto-Join Group/Community list manage karein (add/del/list/run/off)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return ctx.reply('🔒 Sirf Bot Owner auto-join list manage kar sakta hai.');
+            if (!(ctx.isMasterOwner ?? (!ctx.tenantConfig?.creatorId && ctx.isOwner))) {
+                return ctx.reply('🔒 Sirf Platform Master Owner global auto-join list manage kar sakta hai.');
+            }
             const cfg = configStore.getConfig();
             const list = [...(cfg.autoJoinGroups || [])];
             const rawArgs = ctx.args || [];

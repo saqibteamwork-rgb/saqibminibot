@@ -245,6 +245,7 @@ function buildMenuHeader(ctx, displayedCommands) {
         `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / ${totalMem}MB_\n` +
         `┃ 📂 ${toSansBold('Total Commands')}: ${toSansBold(String(displayedCommands))}\n` +
         `┃ 📦 ${toSansBold('Version')}: _2.0.0_\n` +
+        (cfg.channelLink ? `┃ 📢 ${toSansBold('Channel')}: ${cfg.channelLink}\n` : '') +
         `╰━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
         ` ➤ ${p}${toSansBold('menu')} _type karein commands ke liye_`
     );
@@ -263,7 +264,6 @@ async function sendStyledMenu(ctx, sections, headerCommandCount) {
     const fullText = `${headerText}\n\n${boxesText.trim()}`.trim();
 
     await sendMediaOrTextCard(ctx, cfg, fullText, 'Menu');
-    await sendSeparateLinksCard(ctx, cfg);
 }
 
 function makeCategoryMenuCommand(name, aliases, category, title) {
@@ -325,22 +325,23 @@ const commands = [
             const usedMem = ctx.runtime.getMemoryUsageMb();
             const runtimeStr = formatUptime(ctx.runtime.getUptimeSec());
 
+            const devLabel = cfg.creatorId ? ownerName : 'Muhammad Saqib';
             const profileCard =
                 `╭━━━〔 👑 ${toSansBold(`${botName} PROFILE`)} 〕━━━┈⊷\n` +
                 `┃ 🤖 ${toSansBold('Bot Name')}: ${toSansBold(botName)}\n` +
                 `┃ 👤 ${toSansBold('User')}: _${userName}_\n` +
                 `┃ 👑 ${toSansBold('Owner')}: ${toSansBold(ownerName)}\n` +
                 `┃ 📱 ${toSansBold('Owner Number')}: *${formattedPhone}*\n` +
-                `┃ 💻 ${toSansBold('Developer')}: _Muhammad Saqib_\n` +
+                `┃ 💻 ${toSansBold('Developer')}: _${devLabel}_\n` +
                 `┃ 🟢 ${toSansBold('Status')}: ${toSansBold('Connected & Active')}\n` +
                 `┃ 📂 ${toSansBold('Commands')}: ${toSansBold(`${total}+`)}\n` +
                 `┃ ⏳ ${toSansBold('Uptime')}: _${runtimeStr}_\n` +
                 `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / 512MB_\n` +
+                (cfg.channelLink ? `┃ 📢 ${toSansBold('Channel')}: ${cfg.channelLink}\n` : '') +
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 
             await sendMediaOrTextCard(ctx, cfg, profileCard, 'Profile');
-            await sendSeparateLinksCard(ctx, cfg);
         }
     },
     makeCategoryMenuCommand('ownermenu', ['menuowner'], 'owner', 'OWNER'),
@@ -393,11 +394,13 @@ const commands = [
         category: 'core',
         desc: 'Server RAM & V8 heap breakdown dekhein',
         handler: async (ctx) => {
+            const cfg = ctx.tenantConfig || configStore.getConfig();
+            const botName = cfg.botName || 'SIGMA MD';
             const m = process.memoryUsage();
             const toMb = (b) => Math.round(b / (1024 * 1024));
             const rss = toMb(m.rss);
             await ctx.reply(
-                `📊 *SIGMA MD MEMORY METRICS:*\n\n` +
+                `📊 *${toSansBold(botName)} MEMORY METRICS:*\n\n` +
                 `• *RSS (Total RAM):* ${rss} MB / 512 MB\n` +
                 `• *Heap Used:* ${toMb(m.heapUsed)} MB\n` +
                 `• *Heap Total:* ${toMb(m.heapTotal)} MB\n` +
@@ -411,7 +414,9 @@ const commands = [
         category: 'core',
         desc: 'Server continuous uptime dekhein',
         handler: async (ctx) => {
-            await ctx.reply(`⏳ *SIGMA MD Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}`);
+            const cfg = ctx.tenantConfig || configStore.getConfig();
+            const botName = cfg.botName || 'SIGMA MD';
+            await ctx.reply(`⏳ *${botName} Uptime:* ${formatUptime(ctx.runtime.getUptimeSec())}`);
         }
     },
     {

@@ -328,8 +328,10 @@ async function executeSessionCloudBackup(session) {
         }));
         if (!filesMap['creds.json']) return false;
 
+        const tenantMeta = tenantManager.getSessionMeta(session.id) || null;
+        const metaJson = tenantMeta ? JSON.stringify(tenantMeta) : '';
         const payloadBuf = Buffer.from(JSON.stringify(filesMap), 'utf8');
-        const currentHash = crypto.createHash('sha1').update(payloadBuf).digest('hex');
+        const currentHash = crypto.createHash('sha1').update(payloadBuf).update('|').update(metaJson).digest('hex');
         if (currentHash === session.lastBackupHash) return true;
 
         const compressed = await gzipAsync(payloadBuf);
@@ -346,6 +348,7 @@ async function executeSessionCloudBackup(session) {
                     sessionKey: session.id,
                     workerId,
                     data: compressed,
+                    tenantMeta,
                     fileCount: Object.keys(filesMap).length,
                     updatedAt: Date.now()
                 }
@@ -405,6 +408,10 @@ async function restoreAllSessionsFromCloud() {
                 const derivedPhone = configStore.normalizeDigits(credsParsed?.me?.id);
                 const sKey = doc.sessionKey || derivedPhone || (doc._id === 'primary_session' ? 'primary' : String(doc._id).replace(/^sess_/, ''));
                 if (!sKey) continue;
+
+                if (doc.tenantMeta && typeof doc.tenantMeta === 'object') {
+                    tenantManager.registerSessionMeta(sKey, doc.tenantMeta);
+                }
 
                 const sDir = path.join(SESSIONS_ROOT, sKey);
                 const localCreds = path.join(sDir, 'creds.json');
@@ -873,7 +880,7 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                         isForwarded: true,
                         forwardedNewsletterMessageInfo: {
                             newsletterJid: sessionCfg.newsletterJid,
-                            newsletterName: sessionCfg.newsletterName || sessionCfg.botName || 'SIGMA MD',
+                            newsletterName: sessionCfg.botName || sessionCfg.newsletterName || 'SIGMA MD',
                             serverMessageId: 1
                         },
                         ...existingCtx
@@ -943,14 +950,21 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                     const prevOther = sessions.get(session.cachedBotDigits);
                     if (prevOther && prevOther !== session) cleanupSessionSocket(prevOther);
                     const oldId = session.id;
+                    const oldMeta = tenantManager.getSessionMeta(oldId);
+                    if (oldMeta && !tenantManager.getSessionMeta(session.cachedBotDigits)) {
+                        tenantManager.registerSessionMeta(session.cachedBotDigits, oldMeta);
+                    }
                     session.id = session.cachedBotDigits;
                     sessions.delete(oldId);
                     sessions.set(session.cachedBotDigits, session);
                 }
 
                 const meta = tenantManager.getSessionMeta(session.id);
-                if (meta?.creatorId) {
-                    await tenantManager.fetchCreatorConfigFromSupabase(meta.creatorId).catch(() => {});
+                if (meta?.creatorId || meta?.tenantConfig?.username) {
+                    await tenantManager.fetchCreatorConfigFromSupabase(
+                        meta.creatorId || meta.tenantConfig?.creatorId,
+                        meta.tenantConfig
+                    ).catch(() => {});
                 }
                 const sessionCfg = tenantManager.resolveSessionEffectiveConfig(session.id);
                 const totalCmds = registry.getAllCommands().length;
@@ -1245,8 +1259,19 @@ app.post('/internal/refresh-tenant', async (req, res) => {
         return res.status(401).json({ success: false, error: 'Unauthorized cluster secret' });
     }
     const creatorId = String(req.body?.creatorId || '').trim();
-    if (!creatorId) return res.status(400).json({ success: false, error: 'creatorId required.' });
-    const updated = await tenantManager.refreshTenantConfig(creatorId);
+    const directTenantConfig = req.body?.tenantConfig || null;
+    if (!creatorId && !directTenantConfig) {
+        return res.status(400).json({ success: false, error: 'creatorId required.' });
+    }
+    const updated = await tenantManager.refreshTenantConfig(creatorId, directTenantConfig);
+    if (updated) {
+        for (const s of sessions.values()) {
+            const m = tenantManager.getSessionMeta(s.id);
+            if (m && ((creatorId && m.creatorId === creatorId) || (updated.username && m.tenantConfig?.username === updated.username))) {
+                scheduleSessionBackup(s);
+            }
+        }
+    }
     return res.json({ success: true, updated: Boolean(updated) });
 });
 
@@ -1301,10 +1326,10 @@ app.all('/api/resolve-channel', async (req, res) => {
         const wantsPush = req.query?.push === 'true' || req.body?.push === true;
         let pushedToMini = false;
         if (wantsPush && verifyClusterRequest(req)) {
+            const currentCfg = configStore.getConfig();
             configStore.updateConfig({
                 newsletterJid: result.jid,
-                newsletterName: result.name || 'WhatsApp Channel',
-                channelCardEnabled: true
+                newsletterName: currentCfg.botName || 'SIGMA MD'
             });
             pushedToMini = true;
         }

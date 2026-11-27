@@ -602,6 +602,7 @@ function buildPairLinksCard(cfg) {
 }
 
 async function sendSeparateLinksCard(ctx, cfg) {
+    if (cfg?.separateLinksCard !== true) return;
     const linksText = buildPairLinksCard(cfg);
     const newsletterCtx = buildNewsletterContext(cfg);
     const { targetJid } = resolveReplyChatJid(ctx.sock, ctx.from);

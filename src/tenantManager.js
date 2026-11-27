@@ -80,16 +80,18 @@ function getWorkerId() {
 
 function normalizeTenantConfig(raw) {
     if (!raw || typeof raw !== 'object') return null;
+    const botName = String(raw.botName || raw.bot_name || 'SIGMA MD').trim().slice(0, 48) || 'SIGMA MD';
+    const ownerName = String(raw.ownerName || raw.owner_name || 'MR SAQIB').trim().slice(0, 48) || 'MR SAQIB';
     return {
         creatorId: raw.creatorId || raw.id || null,
-        username: raw.username || '',
-        botName: String(raw.botName || raw.bot_name || 'SIGMA MD').trim().slice(0, 48) || 'SIGMA MD',
-        ownerName: String(raw.ownerName || raw.owner_name || 'MR SAQIB').trim().slice(0, 48) || 'MR SAQIB',
+        username: String(raw.username || '').trim().toLowerCase(),
+        botName,
+        ownerName,
         ownerNumber: configStore.normalizeDigits(raw.ownerNumber || raw.owner_number || ''),
         menuPicUrl: String(raw.menuPicUrl || raw.menu_pic_url || '').trim(),
         channelLink: String(raw.channelLink || raw.channel_link || '').trim(),
         channelJid: String(raw.channelJid || raw.channel_jid || '').trim(),
-        channelName: String(raw.channelName || raw.channel_name || raw.botName || raw.bot_name || 'SIGMA MD').trim()
+        channelName: botName
     };
 }
 
@@ -97,10 +99,17 @@ function registerSessionMeta(phone, info = {}) {
     const cleanPhone = configStore.normalizeDigits(phone);
     if (!cleanPhone) return null;
     const prev = sessionMetaMap.get(cleanPhone) || {};
-    const tenantCfg = info.tenantConfig ? normalizeTenantConfig(info.tenantConfig) : prev.tenantConfig || null;
+    const hasCreatorField = Object.prototype.hasOwnProperty.call(info, 'creatorId');
+    const hasTenantField = Object.prototype.hasOwnProperty.call(info, 'tenantConfig');
+    const tenantCfg = hasTenantField
+        ? (info.tenantConfig ? normalizeTenantConfig(info.tenantConfig) : null)
+        : (prev.tenantConfig || null);
+    const creatorId = hasCreatorField
+        ? (info.creatorId || tenantCfg?.creatorId || null)
+        : (tenantCfg?.creatorId || prev.creatorId || null);
     const next = {
-        creatorId: info.creatorId !== undefined ? info.creatorId : prev.creatorId || tenantCfg?.creatorId || null,
-        pendingReferral: info.pendingReferral !== undefined ? info.pendingReferral : prev.pendingReferral || null,
+        creatorId,
+        pendingReferral: info.pendingReferral !== undefined ? info.pendingReferral : (prev.pendingReferral || null),
         tenantConfig: tenantCfg,
         updatedAt: Date.now()
     };
@@ -136,38 +145,92 @@ function getSessionMeta(phone) {
     return sessionMetaMap.get(cleanPhone) || sessionMetaMap.get(String(phone || '')) || null;
 }
 
-async function fetchCreatorConfigFromSupabase(creatorId) {
-    if (!creatorId || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
-    try {
-        const hit = creatorCache.get(creatorId);
-        if (hit && Date.now() - hit.ts < 180000) return hit.config;
+function applyCreatorBrandingToSessions(creatorId, norm) {
+    if (!norm) return;
+    if (creatorId) {
+        creatorCache.set(creatorId, { ts: Date.now(), config: norm });
+        capMap(creatorCache, 200);
+    }
+    for (const meta of sessionMetaMap.values()) {
+        const sameCreator = creatorId && meta.creatorId === creatorId;
+        const sameUsername = norm.username && meta.tenantConfig?.username === norm.username;
+        if (sameCreator || sameUsername) {
+            meta.creatorId = creatorId || meta.creatorId || norm.creatorId || null;
+            meta.tenantConfig = {
+                ...norm,
+                creatorId: creatorId || norm.creatorId || meta.creatorId || null,
+                ownerNumber: norm.ownerNumber || meta.tenantConfig?.ownerNumber || '',
+                channelJid: norm.channelJid || meta.tenantConfig?.channelJid || ''
+            };
+            meta.updatedAt = Date.now();
+        }
+    }
+    scheduleSessionMetaDiskSave();
+}
 
+async function fetchCreatorConfigFromPortal(username, fallbackMeta = null) {
+    const cleanUser = String(username || '').trim().toLowerCase();
+    if (!PORTAL_URL || !cleanUser) return null;
+    try {
         const res = await httpClient.get(
-            `${SUPABASE_URL}/rest/v1/creators?id=eq.${encodeURIComponent(creatorId)}&select=id,username,bot_name,owner_name,owner_number,menu_pic_url,channel_link,channel_jid,channel_name&limit=1`,
-            {
-                timeout: 4500,
-                headers: {
-                    apikey: SUPABASE_SERVICE_KEY,
-                    Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`
-                }
-            }
+            `${PORTAL_URL}/api/creators/${encodeURIComponent(cleanUser)}`,
+            { timeout: 4500 }
         );
-        const row = Array.isArray(res.data) ? res.data[0] : null;
-        if (row) {
-            const norm = normalizeTenantConfig(row);
-            creatorCache.set(creatorId, { ts: Date.now(), config: norm });
-            capMap(creatorCache, 200);
-            for (const meta of sessionMetaMap.values()) {
-                if (meta.creatorId === creatorId) meta.tenantConfig = norm;
-            }
-            scheduleSessionMetaDiskSave();
+        const creator = res.data?.creator;
+        if (res.data?.success && creator) {
+            const norm = normalizeTenantConfig({
+                ...fallbackMeta,
+                ...creator,
+                creatorId: fallbackMeta?.creatorId || creator.id || null,
+                ownerNumber: creator.owner_number || fallbackMeta?.ownerNumber || ''
+            });
+            applyCreatorBrandingToSessions(norm.creatorId, norm);
             return norm;
         }
     } catch (_) {}
     return null;
 }
 
-async function refreshTenantConfig(creatorId) {
+async function fetchCreatorConfigFromSupabase(creatorId, fallbackMeta = null) {
+    if (!creatorId) return null;
+    const hit = creatorCache.get(creatorId);
+    if (hit && Date.now() - hit.ts < 180000) return hit.config;
+
+    if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+        try {
+            const res = await httpClient.get(
+                `${SUPABASE_URL}/rest/v1/creators?id=eq.${encodeURIComponent(creatorId)}&select=id,username,bot_name,owner_name,owner_number,menu_pic_url,channel_link,channel_jid,channel_name&limit=1`,
+                {
+                    timeout: 4500,
+                    headers: {
+                        apikey: SUPABASE_SERVICE_KEY,
+                        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`
+                    }
+                }
+            );
+            const row = Array.isArray(res.data) ? res.data[0] : null;
+            if (row) {
+                const norm = normalizeTenantConfig(row);
+                applyCreatorBrandingToSessions(creatorId, norm);
+                return norm;
+            }
+        } catch (_) {}
+    }
+
+    const usernameHint = fallbackMeta?.username ||
+        Array.from(sessionMetaMap.values()).find((m) => m.creatorId === creatorId)?.tenantConfig?.username || '';
+    if (usernameHint) {
+        return fetchCreatorConfigFromPortal(usernameHint, { ...(fallbackMeta || {}), creatorId });
+    }
+    return null;
+}
+
+async function refreshTenantConfig(creatorId, directTenantConfig = null) {
+    if (directTenantConfig && typeof directTenantConfig === 'object') {
+        const norm = normalizeTenantConfig({ ...directTenantConfig, creatorId: creatorId || directTenantConfig.creatorId });
+        applyCreatorBrandingToSessions(norm.creatorId || creatorId, norm);
+        return norm;
+    }
     if (!creatorId) return null;
     creatorCache.delete(creatorId);
     return fetchCreatorConfigFromSupabase(creatorId);
@@ -226,7 +289,9 @@ function resolveSessionEffectiveConfig(sessionPhone) {
         return {
             ...globalCfg,
             creatorId: null,
-            menuPicUrl: ''
+            menuPicUrl: '',
+            newsletterName: globalCfg.botName || 'SIGMA MD',
+            channelCardEnabled: false
         };
     }
 
@@ -249,8 +314,8 @@ function resolveSessionEffectiveConfig(sessionPhone) {
         menuPicUrl: t.menuPicUrl || '',
         channelLink: t.channelLink || '',
         newsletterJid,
-        newsletterName: t.channelName || t.botName || globalCfg.botName,
-        channelCardEnabled: Boolean(newsletterJid)
+        newsletterName: t.botName || globalCfg.botName,
+        channelCardEnabled: false
     };
 }
 

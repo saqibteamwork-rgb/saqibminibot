@@ -993,17 +993,16 @@ const commands = [
             const [targetPart, customName] = splitPipeArgs(ctx.fullArgs);
             const info = await resolveChannelTarget(ctx.sock, targetPart || ctx.args[0], ctx.msg);
             if (!info?.jid) return ctx.reply(`❌ Valid WhatsApp Channel link ya \`@newsletter\` JID dein (ya channel post par reply karein).`);
-            const nameToSet = customName || info.name || cfg.newsletterName;
+            const nameToSet = cfg.botName || 'SIGMA MD';
             configStore.updateConfig({
                 newsletterJid: info.jid,
-                newsletterName: nameToSet,
-                channelCardEnabled: true
+                newsletterName: nameToSet
             });
             await ctx.reply(
-                `✅ *View Channel Forward Card Updated!*\n` +
-                `📛 *Channel:* ${nameToSet}\n` +
+                `✅ *Bot Channel JID Updated!*\n` +
+                `📛 *Bot Name:* ${nameToSet}\n` +
                 `🆔 *JID:* \`${info.jid}\`\n\n` +
-                `_Ab har reply ke neeche aapka "View channel" pill dikhega!_`
+                `_Forwarded channel card by default OFF hai (on karne ke liye ${ctx.prefix}channelcard on)._`
             );
         }
     },
@@ -1020,7 +1019,7 @@ const commands = [
             if (!['on', 'off'].includes(sub)) {
                 return ctx.reply(`📢 *View Channel Card:* ${cfg.channelCardEnabled ? 'ON' : 'OFF'}\nChannel: *${cfg.newsletterName}* (\`${cfg.newsletterJid}\`)`);
             }
-            configStore.updateConfig({ channelCardEnabled: sub === 'on' });
+            configStore.updateConfig({ channelCardEnabled: sub === 'on', manualChannelCard: sub === 'on' });
             await ctx.reply(`✅ View Channel Forward Card ab *${sub.toUpperCase()}* hai.`);
         }
     },

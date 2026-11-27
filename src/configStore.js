@@ -25,11 +25,7 @@ function resolveBotName(rawVal) {
 }
 
 function resolveNewsletterName(rawVal) {
-    const clean = typeof rawVal === 'string' ? rawVal.trim() : '';
-    if (!clean || /^mini\s*bot(\s*md)?$/i.test(clean) || /^mr\.?\s*saqib$/i.test(clean)) {
-        return 'SIGMA MD';
-    }
-    return clean;
+    return resolveBotName(rawVal);
 }
 
 function resolveMiniPairUrl(rawVal) {
@@ -46,10 +42,11 @@ function getDefaultConfig() {
         botName: resolveBotName(process.env.BOT_NAME),
         ownerName: process.env.OWNER_NAME || 'MR SAQIB',
         newsletterJid: process.env.NEWSLETTER_JID || process.env.NEWSLETTER_ID || '120363431913895899@newsletter',
-        newsletterName: resolveNewsletterName(process.env.CHANNEL_NAME),
+        newsletterName: resolveBotName(process.env.BOT_NAME),
         miniPairUrl: resolveMiniPairUrl(process.env.MINI_PAIR_URL),
         mainPairUrl: process.env.MAIN_PAIR_URL || 'https://mrsaqib.me/pair',
-        channelCardEnabled: true,
+        channelCardEnabled: false,
+        manualChannelCard: false,
         prefix: '.',
         mode: 'public', // public | private | self
         owners: envOwner ? [envOwner] : [],
@@ -86,14 +83,17 @@ function mergeWithDefaults(raw) {
         ...(envOwner ? [envOwner] : [])
     ].filter(Boolean));
 
+    const resolvedBotName = resolveBotName(raw?.botName) || def.botName;
+    const manualCard = Boolean(raw?.manualChannelCard);
     return {
-        botName: resolveBotName(raw?.botName) || def.botName,
+        botName: resolvedBotName,
         ownerName: (typeof raw?.ownerName === 'string' && raw.ownerName.trim()) ? raw.ownerName.trim() : def.ownerName,
         newsletterJid: (typeof raw?.newsletterJid === 'string' && raw.newsletterJid.endsWith('@newsletter')) ? raw.newsletterJid.trim() : def.newsletterJid,
-        newsletterName: resolveNewsletterName(raw?.newsletterName) || def.newsletterName,
+        newsletterName: resolvedBotName,
         miniPairUrl: resolveMiniPairUrl(raw?.miniPairUrl) || def.miniPairUrl,
         mainPairUrl: (typeof raw?.mainPairUrl === 'string' && /^https?:\/\//i.test(raw.mainPairUrl.trim())) ? raw.mainPairUrl.trim() : def.mainPairUrl,
-        channelCardEnabled: raw?.channelCardEnabled === undefined ? def.channelCardEnabled : Boolean(raw.channelCardEnabled),
+        channelCardEnabled: manualCard ? Boolean(raw?.channelCardEnabled) : false,
+        manualChannelCard: manualCard,
         prefix: (typeof raw?.prefix === 'string' && raw.prefix.length > 0 && raw.prefix.length <= 3) ? raw.prefix : def.prefix,
         mode: ['public', 'private', 'self'].includes(raw?.mode) ? raw.mode : def.mode,
         owners: Array.from(ownersSet),

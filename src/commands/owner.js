@@ -76,20 +76,23 @@ const commands = [
                 ? cfg.owners.filter((d) => d && d !== ownerDigits).slice(0, 3)
                 : [];
 
+            const ownerDisplayLine = cfg.creatorId
+                ? `┃ 👤 ${toSansBold('Owner Name')}: _${ownerName}_\n`
+                : `┃ 👤 ${toSansBold('Name')}: _Muhammad Saqib (${ownerName})_\n`;
             const ownerCard =
                 `╭━━━〔 👑 ${toSansBold(`${ownerName} — OWNER`)} 〕━━━┈⊷\n` +
-                `┃ 👤 ${toSansBold('Name')}: _Muhammad Saqib (${ownerName})_\n` +
+                ownerDisplayLine +
                 `┃ 📱 ${toSansBold('Owner Number')}: *${formattedPhone}*\n` +
                 `┃ 💬 ${toSansBold('WhatsApp')}: https://wa.me/${ownerDigits}\n` +
                 (extraOwners.length ? `┃ 🛡️ ${toSansBold('Sudo Owners')}: ${extraOwners.map((d) => `+${d}`).join(', ')}\n` : '') +
-                `┃ 📍 ${toSansBold('Location')}: _Faisalabad, Pakistan_\n` +
-                `┃ 💻 ${toSansBold('Role')}: _Cyber Security & Full-Stack Dev_\n` +
-                `┃ 🤖 ${toSansBold('Engine')}: *${botName}* · _v2.0 Zero-Sleep_\n` +
+                (!cfg.creatorId ? `┃ 📍 ${toSansBold('Location')}: _Faisalabad, Pakistan_\n` : '') +
+                (!cfg.creatorId ? `┃ 💻 ${toSansBold('Role')}: _Cyber Security & Full-Stack Dev_\n` : '') +
+                `┃ 🤖 ${toSansBold('Bot')}: *${botName}* · _v2.0 Zero-Sleep_\n` +
+                (cfg.channelLink ? `┃ 📢 ${toSansBold('Channel')}: ${cfg.channelLink}\n` : '') +
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 
             await sendMediaOrTextCard(ctx, cfg, ownerCard, 'Owner');
-            await sendSeparateLinksCard(ctx, cfg);
 
             // Deliver native WhatsApp vCard contact so owner's number can be messaged/saved in 1 tap
             const safeOwnerDisplay = String(ownerName).replace(/[\r\n;:]+/g, ' ').trim() || 'MR SAQIB';
@@ -596,12 +599,13 @@ const commands = [
 
             configStore.updateConfig({ autoreact: nextState });
             ctx.react(nextState ? '❤️' : '🛑');
+            const showArcHint = !ctx.tenantConfig?.creatorId || ctx.isMasterOwner;
             await ctx.reply(
                 `✅ *Auto-React* ab *${nextState ? 'ON' : 'OFF'}* hai!\n` +
                 (nextState
-                    ? '💬 Har incoming chat message par auto emoji reaction lagega.\n'
-                    : '🛑 Chat auto-reactions band kar diye gaye hain.\n') +
-                `📢 *Channel Auto-React:* *${ctx.prefix}arc <channel-link> ❤️ 🔥* (Main + Mini sync)`
+                    ? '💬 Har incoming chat message par auto emoji reaction lagega.'
+                    : '🛑 Chat auto-reactions band kar diye gaye hain.') +
+                (showArcHint ? `\n📢 *Channel Auto-React:* *${ctx.prefix}arc <channel-link> ❤️ 🔥* (Main + Mini sync)` : '')
             );
         }
     },

@@ -754,6 +754,7 @@ async function handleIncomingForSession(session, msg) {
             isFromMe,
             isOwner,
             isMasterOwner,
+            sessionId: session.id,
             tenantConfig: sessionCfg,
             groupMeta,
             senderRawJid,

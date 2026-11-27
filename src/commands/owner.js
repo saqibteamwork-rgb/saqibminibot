@@ -8,6 +8,7 @@
 const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 const configStore = require('../configStore');
 const clusterMesh = require('../clusterMesh');
+const tenantManager = require('../tenantManager');
 const {
     extractTargetJid,
     resolveJidToDigits,
@@ -48,6 +49,19 @@ async function denyTenantGlobalEdit(ctx) {
     return await ctx.reply(`🔒 *Hosted Bot Guard:* Apna Bot Name, DP ya Channel change karne ke liye Web Admin Dashboard use karein.${panelHint}`);
 }
 
+function getEffectiveCfg(ctx) {
+    return ctx.tenantConfig || configStore.getConfig();
+}
+
+function applySessionOrGlobalToggle(ctx, patch) {
+    if (ctx.tenantConfig?.creatorId && ctx.sessionId) {
+        tenantManager.setSessionToggle(ctx.sessionId, patch);
+        ctx.tenantConfig = { ...ctx.tenantConfig, ...patch };
+        return;
+    }
+    configStore.updateConfig(patch);
+}
+
 async function resolveDigitsFromArgsOrQuote(ctx) {
     const { sock, msg, args, content, groupMeta } = ctx;
     const jid = extractTargetJid(msg, args, content, groupMeta);
@@ -72,7 +86,7 @@ const commands = [
             const ownerName = cfg.ownerName || 'MR SAQIB';
             const ownerDigits = getPrimaryOwnerDigits(cfg);
             const formattedPhone = formatReadablePhone(ownerDigits);
-            const extraOwners = Array.isArray(cfg.owners)
+            const extraOwners = (!cfg.creatorId && Array.isArray(cfg.owners))
                 ? cfg.owners.filter((d) => d && d !== ownerDigits).slice(0, 3)
                 : [];
 
@@ -122,12 +136,11 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
-            if (!isPlatformMaster(ctx)) return denyTenantGlobalEdit(ctx);
             const target = (ctx.args[0] || '').toLowerCase();
             if (!['public', 'private', 'self'].includes(target)) {
-                return ctx.reply(`⚙️ *Current Mode:* ${configStore.getConfig().mode.toUpperCase()}\n\nUsage: *${ctx.prefix}mode public* | *private* | *self*`);
+                return ctx.reply(`⚙️ *Current Mode:* ${String(getEffectiveCfg(ctx).mode || 'public').toUpperCase()}\n\nUsage: *${ctx.prefix}mode public* | *private* | *self*`);
             }
-            configStore.updateConfig({ mode: target });
+            applySessionOrGlobalToggle(ctx, { mode: target });
             await ctx.reply(`✅ Bot mode ab *${target.toUpperCase()}* set ho gaya hai!`);
         }
     },
@@ -139,7 +152,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
-            configStore.updateConfig({ mode: 'public' });
+            applySessionOrGlobalToggle(ctx, { mode: 'public' });
             await ctx.reply('🌍 Bot ab *PUBLIC* mode mein hai — sab users commands chala sakte hain.');
         }
     },
@@ -151,7 +164,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
-            configStore.updateConfig({ mode: 'private' });
+            applySessionOrGlobalToggle(ctx, { mode: 'private' });
             await ctx.reply('🔒 Bot ab *PRIVATE* mode mein hai — sirf Owners commands use kar sakte hain.');
         }
     },
@@ -165,10 +178,10 @@ const commands = [
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const next = (ctx.args[0] || '').trim();
             if (!next) {
-                return ctx.reply(`📌 *Current Prefix:* \`${configStore.getConfig().prefix}\`\nUsage: *${ctx.prefix}setprefix !* ya *${ctx.prefix}setprefix reset*`);
+                return ctx.reply(`📌 *Current Prefix:* \`${getEffectiveCfg(ctx).prefix || '.'}\`\nUsage: *${ctx.prefix}setprefix !* ya *${ctx.prefix}setprefix reset*`);
             }
             const val = next.toLowerCase() === 'reset' ? '.' : next.slice(0, 3);
-            configStore.updateConfig({ prefix: val });
+            applySessionOrGlobalToggle(ctx, { prefix: val });
             await ctx.reply(`✅ Command prefix ab \`${val}\` set ho gaya hai!`);
         }
     },
@@ -238,10 +251,13 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
-            const list = configStore.getConfig().owners;
+            const eff = getEffectiveCfg(ctx);
+            const list = (eff.creatorId && !ctx.isMasterOwner)
+                ? (Array.isArray(eff.owners) ? eff.owners : [])
+                : configStore.getConfig().owners;
             await ctx.reply(
                 `👑 *BOT OWNERS (${list.length}):*\n\n` +
-                list.map((d, i) => `${i + 1}. +${d}${i === 0 ? ' *(Master)*' : ''}`).join('\n')
+                list.map((d, i) => `${i + 1}. +${d}${i === 0 ? ' *(Owner)*' : ''}`).join('\n')
             );
         }
     },
@@ -347,8 +363,8 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || '').toLowerCase();
-            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-Read: *${configStore.getConfig().autoread ? 'ON' : 'OFF'}* (${ctx.prefix}autoread on/off)`);
-            configStore.updateConfig({ autoread: sub === 'on' });
+            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-Read: *${getEffectiveCfg(ctx).autoread ? 'ON' : 'OFF'}* (${ctx.prefix}autoread on/off)`);
+            applySessionOrGlobalToggle(ctx, { autoread: sub === 'on' });
             await ctx.reply(`✅ Auto-Read ab *${sub.toUpperCase()}* hai.`);
         }
     },
@@ -361,8 +377,8 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || '').toLowerCase();
-            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-View Status: *${configStore.getConfig().autoviewStatus ? 'ON' : 'OFF'}* (${ctx.prefix}autoviewstatus on/off)`);
-            configStore.updateConfig({ autoviewStatus: sub === 'on' });
+            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-View Status: *${getEffectiveCfg(ctx).autoviewStatus ? 'ON' : 'OFF'}* (${ctx.prefix}autoviewstatus on/off)`);
+            applySessionOrGlobalToggle(ctx, { autoviewStatus: sub === 'on' });
             await ctx.reply(`✅ Auto-View Status ab *${sub.toUpperCase()}* hai.`);
         }
     },
@@ -375,8 +391,8 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || '').toLowerCase();
-            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-Typing: *${configStore.getConfig().autotyping ? 'ON' : 'OFF'}*`);
-            configStore.updateConfig({ autotyping: sub === 'on' });
+            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-Typing: *${getEffectiveCfg(ctx).autotyping ? 'ON' : 'OFF'}*`);
+            applySessionOrGlobalToggle(ctx, { autotyping: sub === 'on' });
             await ctx.reply(`✅ Auto-Typing ab *${sub.toUpperCase()}* hai.`);
         }
     },
@@ -389,8 +405,8 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || '').toLowerCase();
-            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-Record: *${configStore.getConfig().autorecord ? 'ON' : 'OFF'}*`);
-            configStore.updateConfig({ autorecord: sub === 'on' });
+            if (!['on', 'off'].includes(sub)) return ctx.reply(`Auto-Record: *${getEffectiveCfg(ctx).autorecord ? 'ON' : 'OFF'}*`);
+            applySessionOrGlobalToggle(ctx, { autorecord: sub === 'on' });
             await ctx.reply(`✅ Auto-Record ab *${sub.toUpperCase()}* hai.`);
         }
     },
@@ -403,8 +419,8 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || '').toLowerCase();
-            if (!['on', 'off'].includes(sub)) return ctx.reply(`Anti-Delete: *${configStore.getConfig().antidelete ? 'ON' : 'OFF'}*`);
-            configStore.updateConfig({ antidelete: sub === 'on' });
+            if (!['on', 'off'].includes(sub)) return ctx.reply(`Anti-Delete: *${getEffectiveCfg(ctx).antidelete ? 'ON' : 'OFF'}*`);
+            applySessionOrGlobalToggle(ctx, { antidelete: sub === 'on' });
             await ctx.reply(`✅ Anti-Delete ab *${sub.toUpperCase()}* hai.`);
         }
     },
@@ -500,10 +516,10 @@ const commands = [
         name: 'restart',
         aliases: ['reboot', 'res', 'restartbot'],
         category: 'owner',
-        desc: 'Bot process ko clean restart karein (Heroku auto-boots)',
+        desc: 'Bot process ko clean restart karein (Master Owner Only)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!ctx.isOwner) return denyNonOwner(ctx);
+            if (!ctx.isOwner || !isPlatformMaster(ctx)) return denyNonOwner(ctx);
             await ctx.reply(`🔄 *Restarting ${configStore.getConfig().botName}...* (Uptime tha: ${formatUptime(ctx.runtime.getUptimeSec())})`);
             await ctx.runtime.forceCloudBackup().catch(() => {});
             setTimeout(() => process.exit(0), 1000);
@@ -518,11 +534,11 @@ const commands = [
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyNonOwner(ctx);
             const sub = (ctx.args[0] || '').toLowerCase();
-            const cfg = configStore.getConfig();
+            const cfg = getEffectiveCfg(ctx);
             if (!['on', 'off'].includes(sub)) {
                 return ctx.reply(`📵 *Anti-Call Status:* ${cfg.anticall ? 'ON' : 'OFF'}\nUsage: *${ctx.prefix}anticall on* | *${ctx.prefix}anticall off*`);
             }
-            configStore.updateConfig({ anticall: sub === 'on' });
+            applySessionOrGlobalToggle(ctx, { anticall: sub === 'on' });
             await ctx.reply(`✅ *Anti-Call* ab *${sub.toUpperCase()}* hai!${sub === 'on' ? ' Incoming calls auto-reject hongi.' : ''}`);
         }
     },
@@ -583,7 +599,7 @@ const commands = [
                 if (arcCmd) return arcCmd.handler(ctx);
             }
 
-            const cfg = configStore.getConfig();
+            const cfg = getEffectiveCfg(ctx);
             let nextState = !cfg.autoreact;
             if (firstLower === 'on' || firstLower === 'enable') nextState = true;
             else if (firstLower === 'off' || firstLower === 'disable') nextState = false;
@@ -596,7 +612,7 @@ const commands = [
                 );
             }
 
-            configStore.updateConfig({ autoreact: nextState });
+            applySessionOrGlobalToggle(ctx, { autoreact: nextState });
             ctx.react(nextState ? '❤️' : '🛑');
             const showArcHint = !ctx.tenantConfig?.creatorId || ctx.isMasterOwner;
             await ctx.reply(

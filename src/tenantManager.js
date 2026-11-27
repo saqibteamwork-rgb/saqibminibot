@@ -14,8 +14,44 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const configStore = require('./configStore');
 const { httpClient, isSafePublicHttpUrl } = require('./mediaHelper');
+
+// PBKDF2 + AES-256-GCM phone decryption matching Next.js SaaS Portal (`src/lib/cryptoPhone.ts`)
+const PHONE_PBKDF2_ITERATIONS = 100000;
+const PHONE_CRYPTO_SALT = (process.env.PHONE_CRYPTO_SALT || 'sigma_saas_phone_kdf_salt_2026').trim();
+const PHONE_CRYPTO_SECRET = (process.env.PHONE_CRYPTO_SECRET || process.env.CLUSTER_SECRET || 'saqib_cluster_secure_mesh_2026').trim();
+let cachedPhoneAesKey = null;
+
+function getPhoneAesKey() {
+    if (cachedPhoneAesKey) return cachedPhoneAesKey;
+    const derived = crypto.pbkdf2Sync(PHONE_CRYPTO_SECRET, PHONE_CRYPTO_SALT, PHONE_PBKDF2_ITERATIONS, 64, 'sha256');
+    cachedPhoneAesKey = derived.subarray(0, 32);
+    return cachedPhoneAesKey;
+}
+
+function decryptPhone(storedValue) {
+    const val = String(storedValue || '').trim();
+    if (!val) return '';
+    if (!val.startsWith('enc:v1:')) {
+        return configStore.normalizeDigits(val);
+    }
+    try {
+        const parts = val.split(':');
+        if (parts.length < 5) return '';
+        const iv = Buffer.from(parts[2], 'hex');
+        const authTag = Buffer.from(parts[3], 'hex');
+        const cipherText = parts[4];
+        const decipher = crypto.createDecipheriv('aes-256-gcm', getPhoneAesKey(), iv);
+        decipher.setAuthTag(authTag);
+        let decrypted = decipher.update(cipherText, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return configStore.normalizeDigits(decrypted);
+    } catch (_) {
+        return '';
+    }
+}
 
 const TENANT_STATE_FILE = path.join(__dirname, '..', 'data', 'tenant_sessions.json');
 const PORTAL_URL = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || 'https://sigmamini.vercel.app').trim().replace(/\/+$/, '');
@@ -27,7 +63,7 @@ const MAX_SESSIONS = Math.max(1, parseInt(process.env.MAX_SESSIONS || '40', 10) 
 const RAM_SOFT_LIMIT_MB = Math.max(256, parseInt(process.env.RAM_SOFT_LIMIT_MB || '465', 10) || 465);
 
 // In-memory maps bounded to stay ultra-lightweight inside Heroku 512MB dynos
-const sessionMetaMap = new Map(); // phone -> { creatorId, pendingReferral, tenantConfig, updatedAt }
+const sessionMetaMap = new Map(); // phone -> { creatorId, pendingReferral, tenantConfig, toggles, updatedAt }
 const creatorCache = new Map();   // creatorId -> { ts, config }
 const imageLruCache = new Map();  // safeImageUrl -> { ts, buf }
 
@@ -82,12 +118,13 @@ function normalizeTenantConfig(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const botName = String(raw.botName || raw.bot_name || 'SIGMA MD').trim().slice(0, 48) || 'SIGMA MD';
     const ownerName = String(raw.ownerName || raw.owner_name || 'MR SAQIB').trim().slice(0, 48) || 'MR SAQIB';
+    const rawOwnerNum = raw.ownerNumber || raw.owner_number || '';
     return {
         creatorId: raw.creatorId || raw.id || null,
         username: String(raw.username || '').trim().toLowerCase(),
         botName,
         ownerName,
-        ownerNumber: configStore.normalizeDigits(raw.ownerNumber || raw.owner_number || ''),
+        ownerNumber: decryptPhone(rawOwnerNum),
         menuPicUrl: String(raw.menuPicUrl || raw.menu_pic_url || '').trim(),
         channelLink: String(raw.channelLink || raw.channel_link || '').trim(),
         channelJid: String(raw.channelJid || raw.channel_jid || '').trim(),
@@ -281,13 +318,28 @@ function isMasterOwner(digits) {
     return Boolean(clean && getMasterOwnerSet().has(clean));
 }
 
+function setSessionToggle(phone, patch = {}) {
+    const cleanPhone = configStore.normalizeDigits(phone);
+    if (!cleanPhone || !patch || typeof patch !== 'object') return null;
+    const prev = sessionMetaMap.get(cleanPhone) || { creatorId: null, tenantConfig: null };
+    prev.toggles = { ...(prev.toggles || {}), ...patch };
+    prev.updatedAt = Date.now();
+    sessionMetaMap.set(cleanPhone, prev);
+    capMap(sessionMetaMap, 120);
+    scheduleSessionMetaDiskSave();
+    return prev.toggles;
+}
+
 function resolveSessionEffectiveConfig(sessionPhone) {
     const globalCfg = configStore.getConfig();
     const meta = getSessionMeta(sessionPhone);
     const t = meta?.tenantConfig;
+    const localToggles = (meta?.toggles && typeof meta.toggles === 'object') ? meta.toggles : {};
+
     if (!t) {
         return {
             ...globalCfg,
+            ...localToggles,
             creatorId: null,
             menuPicUrl: '',
             newsletterName: globalCfg.botName || 'SIGMA MD',
@@ -298,19 +350,21 @@ function resolveSessionEffectiveConfig(sessionPhone) {
     const newsletterJid = t.channelJid && /^\d+@newsletter$/.test(t.channelJid)
         ? t.channelJid
         : globalCfg.newsletterJid;
-    const owners = Array.from(new Set([
-        ...(t.ownerNumber ? [t.ownerNumber] : []),
-        ...Array.from(getMasterOwnerSet())
-    ]));
+    // Public owner display for tenant bots shows ONLY that creator's own owner number (master remains silent via isMasterOwner)
+    const cleanBotDigits = configStore.normalizeDigits(sessionPhone);
+    const owners = t.ownerNumber
+        ? [t.ownerNumber]
+        : (cleanBotDigits ? [cleanBotDigits] : []);
 
     return {
         ...globalCfg,
+        ...localToggles,
         creatorId: t.creatorId,
         username: t.username,
         botName: t.botName || globalCfg.botName,
         ownerName: t.ownerName || globalCfg.ownerName,
         owners,
-        tenantOwnerNumber: t.ownerNumber || '',
+        tenantOwnerNumber: t.ownerNumber || cleanBotDigits || '',
         menuPicUrl: t.menuPicUrl || '',
         channelLink: t.channelLink || '',
         newsletterJid,
@@ -486,6 +540,8 @@ module.exports = {
     syncPlatformControls,
     isMasterOwner,
     isSessionOwner,
+    setSessionToggle,
+    decryptPhone,
     resolveSessionEffectiveConfig,
     getTenantImageBuffer,
     getPlatformMandatoryChannels,

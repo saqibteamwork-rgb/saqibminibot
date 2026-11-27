@@ -626,50 +626,19 @@ async function sendMediaOrTextCard(ctx, cfg, captionText, timeoutLabel = 'Card')
     const payloadBase = newsletterCtx ? { contextInfo: newsletterCtx } : {};
 
     if (imgBuf) {
-        // Fast path: relay pre-uploaded WhatsApp imageMessage (skips 77KB re-encrypt + CDN upload -> <60ms!)
-        if (typeof ctx.sock?.relayMessage === 'function' && typeof generateWAMessageFromContent === 'function') {
-            try {
-                const cachedImg = await getCachedUploadedMenuMedia(ctx.sock, imgBuf, mediaKey);
-                if (cachedImg) {
-                    const { targetJid, botPn } = resolveReplyChatJid(ctx.sock, ctx.from);
-                    const isSelf = Boolean(botPn && targetJid && (botPn === targetJid || areJidsSameUser(botPn, targetJid)));
-                    const safeQuoted = (ctx.msg?.message && !ctx.msg.key?.fromMe && !isSelf) ? ctx.msg : undefined;
-
-                    const clonedImg = proto?.Message?.ImageMessage?.toObject
-                        ? proto.Message.ImageMessage.toObject(cachedImg)
-                        : { ...cachedImg };
-                    clonedImg.caption = captionText;
-                    if (newsletterCtx) clonedImg.contextInfo = newsletterCtx;
-                    else delete clonedImg.contextInfo;
-
-                    const waMsg = generateWAMessageFromContent(
-                        targetJid,
-                        { imageMessage: clonedImg },
-                        { userJid: botPn || ctx.sock.user?.id, ...(safeQuoted ? { quoted: safeQuoted } : {}) }
-                    );
-                    await withTimeout(
-                        ctx.sock.relayMessage(targetJid, waMsg.message, { messageId: waMsg.key.id }),
-                        8000,
-                        `${timeoutLabel} relay`
-                    );
-                    if (waMsg?.key?.id && waMsg?.message) ctx.cacheMessage?.(waMsg);
-                    return;
-                }
-            } catch (_) {
-                uploadedMenuCache.delete(ctx.sock);
-            }
-        }
-
+        const { targetJid } = resolveReplyChatJid(ctx.sock, ctx.from);
+        const sendDest = targetJid || ctx.from;
         try {
             await withTimeout(
-                ctx.sock.sendMessage(ctx.from, { image: imgBuf, caption: captionText, ...payloadBase }, replyOpts),
-                8000,
+                ctx.sock.sendMessage(sendDest, { image: imgBuf, caption: captionText, ...payloadBase }, replyOpts),
+                12000,
                 `${timeoutLabel} image send`
             );
             return;
         } catch (_) {}
     }
-    await ctx.sock.sendMessage(ctx.from, { text: captionText, ...payloadBase }, replyOpts);
+    const { targetJid } = resolveReplyChatJid(ctx.sock, ctx.from);
+    await ctx.sock.sendMessage(targetJid || ctx.from, { text: captionText, ...payloadBase }, replyOpts);
 }
 
 module.exports = {

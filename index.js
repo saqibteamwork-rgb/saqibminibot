@@ -280,18 +280,32 @@ async function initMongo() {
 
 configStore.setMongoGetter(initMongo);
 
-function filterLeanSessionFiles(filenames) {
+function filterLeanSessionFiles(authDir, filenames, statsMap = new Map()) {
+    const sortNewest = (arr) => arr.sort((a, b) => (statsMap.get(b)?.mtimeMs || 0) - (statsMap.get(a)?.mtimeMs || 0));
     const creds = filenames.filter((f) => f === 'creds.json');
     const appState = filenames.filter((f) => f.startsWith('app-state-sync-key-'));
+    const lidMappings = sortNewest(filenames.filter((f) => f.startsWith('lid-mapping-'))).slice(0, 150);
+    const deviceLists = sortNewest(filenames.filter((f) => f.startsWith('device-list-'))).slice(0, 120);
+    const tcTokens = sortNewest(filenames.filter((f) => f.startsWith('tctoken-'))).slice(0, 90);
     const preKeys = filenames
         .filter((f) => f.startsWith('pre-key-'))
         .sort((a, b) => (parseInt(b.replace(/\D/g, ''), 10) || 0) - (parseInt(a.replace(/\D/g, ''), 10) || 0))
-        .slice(0, 45);
-    const senderKeys = filenames.filter((f) => f.startsWith('sender-key-') && !f.startsWith('sender-key-memory-')).slice(0, 90);
-    const chatSessions = filenames.filter((f) => f.startsWith('session-')).slice(0, 90);
-    const identityKeys = filenames.filter((f) => f.startsWith('identity-')).slice(0, 45);
+        .slice(0, 60);
+    const senderKeys = sortNewest(filenames.filter((f) => f.startsWith('sender-key-') && !f.startsWith('sender-key-memory-'))).slice(0, 120);
+    const chatSessions = sortNewest(filenames.filter((f) => f.startsWith('session-'))).slice(0, 120);
+    const identityKeys = sortNewest(filenames.filter((f) => f.startsWith('identity-'))).slice(0, 60);
 
-    return new Set([...creds, ...appState, ...preKeys, ...senderKeys, ...chatSessions, ...identityKeys]);
+    return new Set([
+        ...creds,
+        ...appState,
+        ...lidMappings,
+        ...deviceLists,
+        ...tcTokens,
+        ...preKeys,
+        ...senderKeys,
+        ...chatSessions,
+        ...identityKeys
+    ]);
 }
 
 function isRegisteredCredsJson(rawStr) {
@@ -317,12 +331,16 @@ async function executeSessionCloudBackup(session) {
         if (!isRegisteredCredsJson(rawCreds)) return false;
 
         const allFiles = await fs.readdir(session.authDir);
-        const leanSet = filterLeanSessionFiles(allFiles);
+        const statsMap = new Map();
+        await Promise.all(allFiles.map(async (f) => {
+            const st = await fs.stat(path.join(session.authDir, f)).catch(() => null);
+            if (st?.isFile()) statsMap.set(f, st);
+        }));
+        const leanSet = filterLeanSessionFiles(session.authDir, allFiles, statsMap);
         const filesMap = {};
         await Promise.all(Array.from(leanSet).map(async (f) => {
             const fp = path.join(session.authDir, f);
-            const stat = await fs.stat(fp).catch(() => null);
-            if (stat?.isFile()) {
+            if (statsMap.has(f)) {
                 filesMap[f] = await fs.readFile(fp, 'utf8');
             }
         }));
@@ -521,7 +539,7 @@ async function handleIncomingForSession(session, msg) {
         if (!sock) return;
 
         const sessionCfg = tenantManager.resolveSessionEffectiveConfig(session.id);
-        if (sessionCfg.antidelete) cacheMessage(msg);
+        cacheMessage(msg);
 
         if (msg.key.remoteJid === 'status@broadcast') {
             if (sessionCfg.autoviewStatus && !msg.key.fromMe) {
@@ -777,7 +795,8 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
         await fs.ensureDir(session.authDir);
 
         const { state, saveCreds } = await useMultiFileAuthState(session.authDir);
-        const boundedSignalCache = new BoundedSignalCache(250, 120000);
+        const boundedSignalCache = new BoundedSignalCache(400, 180000);
+        const sessionRetryCache = new BoundedSignalCache(400, 180000);
 
         const originalKeysSet = state.keys.set;
         state.keys.set = async (data) => {
@@ -806,15 +825,15 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
             logger: silentLogger,
             browser: Browsers.ubuntu('Chrome'),
             syncFullHistory: false,
-            fireInitQueries: false,
             shouldSyncHistoryMessage: () => false,
             markOnlineOnConnect: false,
-            keepAliveIntervalMs: 25000,
+            keepAliveIntervalMs: 20000,
             connectTimeoutMs: 25000,
             defaultQueryTimeoutMs: 20000,
             emitOwnEvents: true,
             retryRequestDelayMs: 600,
-            maxMsgRetryCount: 4,
+            maxMsgRetryCount: 5,
+            msgRetryCounterCache: sessionRetryCache,
             generateHighQualityLinkPreview: false,
             cachedGroupMetadata: async (jid) => getCachedGroupMeta(session.sock, jid),
             getMessage: async (key) => {
@@ -824,6 +843,27 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                     return messageStore.get(`${key.remoteJid}:${key.id}`);
                 }
                 return undefined;
+            },
+            patchMessageBeforeSending: (message) => {
+                const requiresPatch = !!(
+                    message.buttonsMessage ||
+                    message.templateMessage ||
+                    message.listMessage
+                );
+                if (requiresPatch) {
+                    return {
+                        viewOnceMessage: {
+                            message: {
+                                messageContextInfo: {
+                                    deviceListMetadata: {},
+                                    deviceListMetadataVersion: 2
+                                },
+                                ...message
+                            }
+                        }
+                    };
+                }
+                return message;
             }
         });
 
@@ -889,7 +929,7 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
             }
 
             const sentMsg = await rawSendMessage(jid, content, options);
-            if (sessionCfg.antidelete) cacheMessage(sentMsg);
+            cacheMessage(sentMsg);
             return sentMsg;
         };
 

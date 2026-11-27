@@ -345,7 +345,7 @@ async function sendPayloadToChannel(sock, jid, mediaPayload, textPayload) {
 const commands = [
     {
         name: 'cforward',
-        aliases: ['chforward', 'cf', 'cforwrd', 'chfwd'],
+        aliases: ['chforward', 'cf', 'cforwrd', 'chfwd', 'cforwared', 'chforwared', 'cfrored', 'cfall', 'cforwardall'],
         category: 'channel',
         desc: 'Quoted media/text ya naya text WhatsApp Channel par bhejein',
         ownerOnly: true,
@@ -387,6 +387,13 @@ const commands = [
             if (!mediaPayload && !textPayload) {
                 return ctx.reply(`⚠️ Kisi post/media par reply karein ya text likhein!\nExample: *${ctx.prefix}cforward https://whatsapp.com/channel/CODE Hello!*`);
             }
+
+            ctx.react('📢');
+            await ctx.reply(
+                channel
+                    ? `📢 Target channel *${channel.name || channel.jid}* par post ho rahi hai...`
+                    : `📢 Aap *${destinations.length}* WhatsApp channel(s) mein Admin/Owner hain — sab par post ho rahi hai...\n📋 *Channels:* ${destinations.slice(0, 6).map((d) => d.name || d.jid).join(', ')}`
+            );
 
             let ok = 0;
             let fail = 0;

@@ -447,7 +447,7 @@ const commands = [
     },
     {
         name: 'pairmd',
-        aliases: ['mdpair', 'pairmain', 'mainpair', 'getpair', 'pair'],
+        aliases: ['mdpair', 'pairmain', 'mainpair'],
         category: 'core',
         desc: 'Mini Bot ke andar se Main Bot (MR SAQIB MD) ka pairing code lein (.pairmd 923xxxxxxxxx)',
         handler: async (ctx) => {
@@ -495,18 +495,19 @@ const commands = [
         }
     },
     {
-        name: 'pairmini',
-        aliases: ['minipair', 'pairbot'],
+        name: 'pair',
+        aliases: ['pairmini', 'minipair', 'pairbot', 'getpair'],
         category: 'core',
-        desc: 'SIGMA Mini Bot ka pairing code hasil karein (.pairmini 923xxxxxxxxx)',
+        desc: 'SIGMA Mini Bot ka pairing code hasil karein (.pair 923xxxxxxxxx)',
         handler: async (ctx) => {
             const { number, hasForce } = await resolvePairRequestTarget(ctx);
             const cfg = configStore.getConfig();
             const miniWeb = cfg.miniPairUrl || 'https://sigmamini.vercel.app';
             if (!number) {
                 return ctx.reply(
-                    `🤖 *MINI BOT PAIRING (.pairmini)*\n\n` +
-                    `Usage: *${ctx.prefix}pairmini 923001234567*\n` +
+                    `🤖 *MINI BOT PAIRING (${ctx.prefix}pair)*\n\n` +
+                    `Usage: *${ctx.prefix}pair 923001234567*\n` +
+                    `_Main Bot pairing ke liye *${ctx.prefix}pairmd 923001234567* likhein._\n` +
                     `🌐 Web Link: ${miniWeb}`
                 );
             }
@@ -522,7 +523,7 @@ const commands = [
                 if (httpStatus === 409) {
                     return ctx.reply(
                         `⚠️ *SIGMA MINI BOT* par abhi ek number pehle se connected hai.\n` +
-                        (ctx.isOwner ? `💡 Force re-pair ke liye *${ctx.prefix}pairmini ${number} force* likhein.\n` : '') +
+                        (ctx.isOwner ? `💡 Force re-pair ke liye *${ctx.prefix}pair ${number} force* likhein.\n` : '') +
                         `🌐 Web Dashboard: ${miniWeb}`
                     );
                 }

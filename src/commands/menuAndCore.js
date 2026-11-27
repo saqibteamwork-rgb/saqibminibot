@@ -245,7 +245,6 @@ function buildMenuHeader(ctx, displayedCommands) {
         `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / ${totalMem}MB_\n` +
         `┃ 📂 ${toSansBold('Total Commands')}: ${toSansBold(String(displayedCommands))}\n` +
         `┃ 📦 ${toSansBold('Version')}: _2.0.0_\n` +
-        (cfg.channelLink ? `┃ 📢 ${toSansBold('Channel')}: ${cfg.channelLink}\n` : '') +
         `╰━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
         ` ➤ ${p}${toSansBold('menu')} _type karein commands ke liye_`
     );
@@ -337,7 +336,6 @@ const commands = [
                 `┃ 📂 ${toSansBold('Commands')}: ${toSansBold(`${total}+`)}\n` +
                 `┃ ⏳ ${toSansBold('Uptime')}: _${runtimeStr}_\n` +
                 `┃ 📊 ${toSansBold('RAM')}: _${usedMem}MB / 512MB_\n` +
-                (cfg.channelLink ? `┃ 📢 ${toSansBold('Channel')}: ${cfg.channelLink}\n` : '') +
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 

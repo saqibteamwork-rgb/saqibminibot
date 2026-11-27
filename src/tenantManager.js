@@ -291,7 +291,7 @@ function resolveSessionEffectiveConfig(sessionPhone) {
             creatorId: null,
             menuPicUrl: '',
             newsletterName: globalCfg.botName || 'SIGMA MD',
-            channelCardEnabled: false
+            channelCardEnabled: globalCfg.channelCardEnabled !== false && Boolean(globalCfg.newsletterJid)
         };
     }
 
@@ -315,7 +315,7 @@ function resolveSessionEffectiveConfig(sessionPhone) {
         channelLink: t.channelLink || '',
         newsletterJid,
         newsletterName: t.botName || globalCfg.botName,
-        channelCardEnabled: false
+        channelCardEnabled: Boolean(newsletterJid)
     };
 }
 

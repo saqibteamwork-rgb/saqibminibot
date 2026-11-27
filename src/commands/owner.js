@@ -88,7 +88,6 @@ const commands = [
                 (!cfg.creatorId ? `┃ 📍 ${toSansBold('Location')}: _Faisalabad, Pakistan_\n` : '') +
                 (!cfg.creatorId ? `┃ 💻 ${toSansBold('Role')}: _Cyber Security & Full-Stack Dev_\n` : '') +
                 `┃ 🤖 ${toSansBold('Bot')}: *${botName}* · _v2.0 Zero-Sleep_\n` +
-                (cfg.channelLink ? `┃ 📢 ${toSansBold('Channel')}: ${cfg.channelLink}\n` : '') +
                 `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
                 `➤ _${ctx.prefix}menu type karein tamam commands dekhne ke liye_`;
 

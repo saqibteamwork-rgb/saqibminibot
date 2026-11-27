@@ -45,7 +45,7 @@ function getDefaultConfig() {
         newsletterName: resolveBotName(process.env.BOT_NAME),
         miniPairUrl: resolveMiniPairUrl(process.env.MINI_PAIR_URL),
         mainPairUrl: process.env.MAIN_PAIR_URL || 'https://mrsaqib.me/pair',
-        channelCardEnabled: false,
+        channelCardEnabled: true,
         manualChannelCard: false,
         prefix: '.',
         mode: 'public', // public | private | self
@@ -92,7 +92,7 @@ function mergeWithDefaults(raw) {
         newsletterName: resolvedBotName,
         miniPairUrl: resolveMiniPairUrl(raw?.miniPairUrl) || def.miniPairUrl,
         mainPairUrl: (typeof raw?.mainPairUrl === 'string' && /^https?:\/\//i.test(raw.mainPairUrl.trim())) ? raw.mainPairUrl.trim() : def.mainPairUrl,
-        channelCardEnabled: manualCard ? Boolean(raw?.channelCardEnabled) : false,
+        channelCardEnabled: (manualCard && raw?.channelCardEnabled === false) ? false : true,
         manualChannelCard: manualCard,
         prefix: (typeof raw?.prefix === 'string' && raw.prefix.length > 0 && raw.prefix.length <= 3) ? raw.prefix : def.prefix,
         mode: ['public', 'private', 'self'].includes(raw?.mode) ? raw.mode : def.mode,

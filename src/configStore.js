@@ -61,8 +61,11 @@ function getDefaultConfig() {
         antidelete: false,
         autovv: false,
         anticall: false,
+        autoreact: false,
         autoFollowChannels: [],
         autoJoinGroups: [],
+        arcChannels: {},
+        miniClusterNodes: [],
         groups: {}
     };
 }
@@ -102,8 +105,11 @@ function mergeWithDefaults(raw) {
         antidelete: Boolean(raw?.antidelete),
         autovv: Boolean(raw?.autovv),
         anticall: Boolean(raw?.anticall),
+        autoreact: Boolean(raw?.autoreact),
         autoFollowChannels: Array.isArray(raw?.autoFollowChannels) ? raw.autoFollowChannels : [],
         autoJoinGroups: Array.isArray(raw?.autoJoinGroups) ? raw.autoJoinGroups : [],
+        arcChannels: (raw?.arcChannels && typeof raw.arcChannels === 'object' && !Array.isArray(raw.arcChannels)) ? raw.arcChannels : {},
+        miniClusterNodes: Array.isArray(raw?.miniClusterNodes) ? raw.miniClusterNodes.filter(Boolean) : [],
         groups: (raw?.groups && typeof raw.groups === 'object') ? raw.groups : {}
     };
 }

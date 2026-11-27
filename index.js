@@ -35,6 +35,7 @@ const {
 } = require('@whiskeysockets/baileys');
 
 const configStore = require('./src/configStore');
+const clusterMesh = require('./src/clusterMesh');
 const { installSoundStickerProtoPatch } = require('./src/soundStickerProto');
 installSoundStickerProtoPatch();
 const registry = require('./src/commands');
@@ -565,6 +566,28 @@ async function initWhatsApp(pairingNumber = null) {
                     }, 12000);
                 }
 
+                // Subscribe live newsletter updates for ARC + Auto-Follow channels & renew 300s lease every 120s
+                setTimeout(() => {
+                    if (sock === activeSock && isConnected) {
+                        clusterMesh.syncAllNewsletterSubscriptions(sock).catch(() => {});
+                    }
+                }, 14000);
+                if (!sock.__newsletterKeepAliveTimer) {
+                    sock.__newsletterKeepAliveTimer = setInterval(() => {
+                        if (sock === activeSock && isConnected) {
+                            clusterMesh.syncAllNewsletterSubscriptions(sock).catch(() => {});
+                        }
+                    }, 120000);
+                    sock.__newsletterKeepAliveTimer.unref?.();
+                }
+
+                const selfUrl = clusterMesh.getSelfUrl();
+                if (selfUrl) {
+                    setTimeout(() => {
+                        clusterMesh.broadcastToAllClusters('register_mini_node', { url: selfUrl }).catch(() => {});
+                    }, 9000);
+                }
+
                 // Background auto-join configured groups / communities if any
                 if (Array.isArray(cfg.autoJoinGroups) && cfg.autoJoinGroups.length > 0) {
                     setTimeout(async () => {
@@ -655,7 +678,15 @@ async function initWhatsApp(pairingNumber = null) {
                     if (!msg.message?.deviceSentMessage?.destinationJid) return;
                 }
 
-                if (msg.key.remoteJid?.endsWith('@newsletter')) return;
+                if (msg.key.remoteJid?.endsWith('@newsletter')) {
+                    const chJid = msg.key.remoteJid;
+                    const arcConf = cfg.arcChannels?.[chJid];
+                    const serverId = msg.key?.server_id || msg.messageServerId || msg.newsletterServerId || msg.attrs?.server_id;
+                    if (arcConf?.enabled !== false && arcConf && serverId) {
+                        clusterMesh.executeMiniArcReaction(sock, chJid, serverId, arcConf).catch(() => {});
+                    }
+                    return;
+                }
 
                 const protoMsg = msg.message?.protocolMessage;
                 if (protoMsg?.type === 0 && cfg.antidelete) {
@@ -716,12 +747,19 @@ async function initWhatsApp(pairingNumber = null) {
                 const content = unwrapMessage(rawRoot);
                 if (!content) return;
                 const rawText = getTextFromContent(content);
+                const cleanText = (rawText || '').replace(/[\u200e\u200f\u200b\u200c\u200d\u2060\ufeff]/g, '').trim();
+                const activePrefix = cfg.prefix || '.';
+                const match = cleanText ? cleanText.match(getPrefixRegex(activePrefix)) : null;
+
+                if (cfg.autoreact && !isFromMe && !match && rawRoot && !rawRoot.protocolMessage && !rawRoot.reactionMessage) {
+                    const reactPool = ['❤️', '🔥', '👍', '👏', '✨', '⚡', '😍', '🎉'];
+                    const pickedEmoji = reactPool[Math.floor(Math.random() * reactPool.length)];
+                    sock.sendMessage(from, { react: { text: pickedEmoji, key: msg.key } }).catch(() => {});
+                }
+
                 if (!rawText) return;
 
                 // Ultra-fast synchronous gate BEFORE fetching groupMetadata or resolving LIDs
-                const cleanText = rawText.replace(/[\u200e\u200f\u200b\u200c\u200d\u2060\ufeff]/g, '').trim();
-                const activePrefix = cfg.prefix || '.';
-                const match = cleanText.match(getPrefixRegex(activePrefix));
                 const gs = isGroup ? configStore.getGroupSettings(from) : null;
                 const hasLinkViolation = Boolean(
                     isGroup && gs?.antilink && !isFromMe && /(https?:\/\/)?(chat\.whatsapp\.com|whatsapp\.com\/channel)\/\S+/i.test(rawText)
@@ -909,8 +947,40 @@ setInterval(() => {
 // ═════════════════════════════════════════════════════════════
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
+app.use((req, _res, next) => {
+    const fwdHost = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+    if (fwdHost && !/^(localhost|127\.0\.0\.1)/i.test(String(fwdHost))) {
+        clusterMesh.setDetectedSelfUrl(`${proto}://${String(fwdHost).split(',')[0].trim()}`);
+    }
+    next();
+});
 app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d' }));
+
+app.post('/api/cluster-action', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const secret = body.secret || req.headers['x-cluster-secret'];
+        if (!secret || secret !== clusterMesh.CLUSTER_SECRET) {
+            return res.status(401).json({ success: false, error: 'Unauthorized cluster secret' });
+        }
+        if (body.action === 'resolve_channel' || body.action === 'resolve_poll') {
+            const out = await clusterMesh.handleIncomingClusterAction({ ...body, secret }, { getSock: () => sock });
+            return res.json(out);
+        }
+        res.json({
+            accepted: true,
+            nodeId: clusterMesh.getSelfUrl() || 'sigmamini',
+            queuedAction: body.action || 'unknown'
+        });
+        setImmediate(() => {
+            clusterMesh.handleIncomingClusterAction({ ...body, secret }, { getSock: () => sock }).catch(() => {});
+        });
+    } catch (e) {
+        if (!res.headersSent) res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 app.get('/menu-preview', (req, res) => {
     const imgBuf = getMenuImageBuffer();
@@ -927,6 +997,8 @@ app.get(['/health', '/ping'], (req, res) => {
         botName: cfg.botName,
         connected: isConnected,
         totalCommands: registry.getAllCommands().length,
+        miniNodesCount: clusterMesh.getMiniNodes(true).length,
+        arcChannelsCount: Object.keys(cfg.arcChannels || {}).length,
         uptimeSeconds: getUptimeSec(),
         ramUsageMb: getMemoryUsageMb(),
         timestamp: Date.now()

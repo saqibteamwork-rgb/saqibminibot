@@ -7,6 +7,7 @@
 
 const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 const configStore = require('../configStore');
+const clusterMesh = require('../clusterMesh');
 const {
     extractTargetJid,
     resolveJidToDigits,
@@ -22,7 +23,8 @@ const {
     sendSeparateLinksCard,
     setCustomMenuImageBuffer,
     resetCustomMenuImageBuffer,
-    hasCustomMenuImage
+    hasCustomMenuImage,
+    httpClient
 } = require('../mediaHelper');
 
 async function denyNonOwner(ctx) {
@@ -533,6 +535,105 @@ const commands = [
             await ctx.reply(ok
                 ? `🔄 *Menu Card Default Photo Par Reset Ho Gayi!*${hadCustom ? ' (Custom image removed)' : ''}`
                 : 'ℹ️ Default SIGMA Menu photo active hai.'
+            );
+        }
+    },
+    {
+        name: 'autoreact',
+        aliases: ['autoreacts', 'autoreaction', 'autoreactchat'],
+        category: 'owner',
+        desc: 'Chat messages par Auto-React ON/OFF ya Channel links par Cross-Bot .arc lagayein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyNonOwner(ctx);
+            const joined = (ctx.args || []).join(' ');
+            const hasChannelTarget = /(?:whatsapp\.com\/channel\/|[0-9]{10,}@newsletter)/i.test(joined);
+            const qUnwrapped = unwrapMessage(getContextInfo(unwrapMessage(ctx.msg?.message))?.quotedMessage);
+            const qChannel = Boolean(
+                getContextInfo(unwrapMessage(ctx.msg?.message))?.forwardedNewsletterMessageInfo?.newsletterJid ||
+                getContextInfo(qUnwrapped)?.forwardedNewsletterMessageInfo?.newsletterJid
+            );
+            const firstLower = String(ctx.args?.[0] || '').toLowerCase();
+
+            // Route channel URLs or quoted newsletter posts directly to cross-bot .arc!
+            if (hasChannelTarget || (qChannel && !['on', 'off', 'status'].includes(firstLower))) {
+                const arcCmd = ctx.registry?.findCommand('arc');
+                if (arcCmd) return arcCmd.handler(ctx);
+            }
+
+            const cfg = configStore.getConfig();
+            let nextState = !cfg.autoreact;
+            if (firstLower === 'on' || firstLower === 'enable') nextState = true;
+            else if (firstLower === 'off' || firstLower === 'disable') nextState = false;
+            else if (firstLower === 'status') {
+                return ctx.reply(
+                    `💖 *Chat Auto-React:* ${cfg.autoreact ? 'ON' : 'OFF'}\n` +
+                    `📢 *Channel Auto-React (.arc):* ${Object.keys(cfg.arcChannels || {}).length} channels\n\n` +
+                    `• *${ctx.prefix}autoreact on* / *off*\n` +
+                    `• *${ctx.prefix}autoreact <channel-link> ❤️ 🔥*`
+                );
+            }
+
+            configStore.updateConfig({ autoreact: nextState });
+            ctx.react(nextState ? '❤️' : '🛑');
+            await ctx.reply(
+                `✅ *Auto-React* ab *${nextState ? 'ON' : 'OFF'}* hai!\n` +
+                (nextState
+                    ? '💬 Har incoming chat message par auto emoji reaction lagega.\n'
+                    : '🛑 Chat auto-reactions band kar diye gaye hain.\n') +
+                `📢 *Channel Auto-React:* *${ctx.prefix}arc <channel-link> ❤️ 🔥* (Main + Mini sync)`
+            );
+        }
+    },
+    {
+        name: 'mininode',
+        aliases: ['clusternodes', 'nodes'],
+        category: 'owner',
+        desc: '40-Server Mini Bot cluster nodes dekhein, add ya remove karein',
+        ownerOnly: true,
+        handler: async (ctx) => {
+            if (!ctx.isOwner) return denyNonOwner(ctx);
+            const sub = (ctx.args[0] || 'list').toLowerCase();
+            const rawUrl = (ctx.args[1] || '').trim();
+
+            if (sub === 'add' && rawUrl) {
+                const added = clusterMesh.registerMiniNode(rawUrl);
+                if (!added) {
+                    return ctx.reply(`❌ Invalid URL! Valid https:// URL dein (e.g. *${ctx.prefix}mininode add https://mini2.herokuapp.com*).`);
+                }
+                const cleanUrl = rawUrl.replace(/\/+$/, '');
+                clusterMesh.broadcastToAllClusters('register_mini_node', { url: cleanUrl }).catch(() => {});
+                return ctx.reply(
+                    `✅ *Mini Bot Server Node Registered!*\n` +
+                    `🖥️ URL: \`${cleanUrl}\`\n` +
+                    `🌐 Total Mini Nodes: *${clusterMesh.getMiniNodes(true).length}* (Synced across cluster)`
+                );
+            }
+
+            if ((sub === 'del' || sub === 'remove' || sub === 'rm') && rawUrl) {
+                const removed = clusterMesh.removeMiniNode(rawUrl);
+                return ctx.reply(removed
+                    ? `🗑️ Node remove ho gaya. Remaining Mini Nodes: *${clusterMesh.getMiniNodes(true).length}*`
+                    : `❌ Node list mein nahi mila: \`${rawUrl}\``
+                );
+            }
+
+            const nodes = clusterMesh.getMiniNodes(true);
+            const statuses = await Promise.all(nodes.map(async (url, idx) => {
+                try {
+                    const res = await httpClient.get(`${url}/health`, { timeout: 3000 });
+                    const d = res.data || {};
+                    const state = d.connected ? '🟢 Connected' : '🟡 Free (Ready to Pair)';
+                    return `${idx + 1}. \`${url}\`\n   ${state} | RAM: ${d.ramUsageMb || '?'}MB`;
+                } catch (_) {
+                    return `${idx + 1}. \`${url}\`\n   🔴 Offline / Sleeping`;
+                }
+            }));
+            await ctx.reply(
+                `🖥️ *MINI BOT CLUSTER NODES (${nodes.length}/40+ Ready):*\n\n` +
+                statuses.join('\n') +
+                `\n\n➕ Add: *${ctx.prefix}mininode add https://app.herokuapp.com*\n` +
+                `🗑️ Remove: *${ctx.prefix}mininode del https://app.herokuapp.com*`
             );
         }
     }

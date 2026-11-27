@@ -8,11 +8,13 @@
 
 const os = require('os');
 const configStore = require('../configStore');
+const clusterMesh = require('../clusterMesh');
 const {
     formatUptime,
     toSansBold,
     getPrimaryOwnerDigits,
     formatReadablePhone,
+    buildNewsletterContext,
     sendMediaOrTextCard,
     sendSeparateLinksCard,
     extractTargetJid,
@@ -20,15 +22,6 @@ const {
     httpClient
 } = require('../mediaHelper');
 
-const MAIN_BOT_NODES = [
-    'https://web-production-08da5300.up.railway.app',
-    'https://saqib-bot-v1-d3ecc6f0292e.herokuapp.com',
-    'https://saqib-bot-s2-1cceb03e9698.herokuapp.com',
-    'https://saqibbot3-bb2b46aa1cb4.herokuapp.com',
-    'https://saqibot4-1469f73b3d77.herokuapp.com',
-    'https://saqibbot5-5ffa090fe31f.herokuapp.com',
-    'https://saqibot6-061b6d17645d.herokuapp.com'
-];
 const pairReqCooldown = new Map();
 
 function normalizePairDigits(raw) {
@@ -89,20 +82,7 @@ function checkPairCooldown(key) {
 }
 
 async function pickHealthyMainBotNode() {
-    const probes = MAIN_BOT_NODES.map(async (url) => {
-        try {
-            const res = await httpClient.get(`${url}/health`, { timeout: 3500 });
-            const d = res.data || {};
-            const active = typeof d.activeSessions === 'number' ? d.activeSessions : (d.pairedSessions || 0);
-            const max = typeof d.maxSessions === 'number' ? d.maxSessions : 25;
-            return { url, active, max, mem: d.memoryUsageMb || 0 };
-        } catch (_) {
-            return null;
-        }
-    });
-    const results = (await Promise.all(probes)).filter(Boolean);
-    results.sort((a, b) => (a.active - b.active) || (a.mem - b.mem));
-    return (results.find((n) => n.active < n.max) || results[0])?.url || MAIN_BOT_NODES[0];
+    return clusterMesh.pickHealthyMainBotNode();
 }
 
 async function requestMainBotPair(number, customCode = '') {
@@ -134,15 +114,30 @@ async function requestMiniBotPair(number, allowForce = false) {
     const cfg = configStore.getConfig();
     const miniBase = String(cfg.miniPairUrl || 'https://sigmamini.vercel.app').replace(/\/+$/, '');
     const forceQ = allowForce ? '&force=true' : '';
-    const urls = [
-        `${miniBase}/api/pair?number=${encodeURIComponent(number)}${forceQ}`,
-        `https://sigmaminibot-8fdafb0f00ef.herokuapp.com/pair?number=${encodeURIComponent(number)}${forceQ}`
-    ];
+    const urls = [];
+
+    if (!allowForce) {
+        const freeNode = await clusterMesh.pickAvailableMiniBotNode(false).catch(() => null);
+        if (freeNode) {
+            urls.push(`${freeNode}/pair?number=${encodeURIComponent(number)}`);
+        }
+    }
+    urls.push(`${miniBase}/api/pair?number=${encodeURIComponent(number)}${forceQ}`);
+    for (const nodeUrl of clusterMesh.getMiniNodes(false)) {
+        const ep = `${nodeUrl}/pair?number=${encodeURIComponent(number)}${forceQ}`;
+        if (!urls.includes(ep)) urls.push(ep);
+    }
+
     let lastErr = null;
+    let lastConflict = null;
     for (const url of urls) {
         try {
             const res = await httpClient.get(url, { timeout: 22000, validateStatus: () => true });
             if (res.data && typeof res.data === 'object') {
+                if (res.status === 409) {
+                    lastConflict = { httpStatus: 409, data: res.data, source: url };
+                    continue;
+                }
                 if (res.status !== 502 && res.status !== 503 && res.status !== 504) {
                     return { httpStatus: res.status, data: res.data, source: url };
                 }
@@ -152,10 +147,13 @@ async function requestMiniBotPair(number, allowForce = false) {
             lastErr = e;
         }
     }
+    if (lastConflict) return lastConflict;
     throw lastErr || new Error('Mini Bot server busy hai, kuch second baad try karein.');
 }
 
 async function sendCrossPairSuccess(ctx, number, rawCode, opts) {
+    const cfg = configStore.getConfig();
+    const newsletterCtx = buildNewsletterContext(cfg);
     const cleanCode = String(rawCode).replace(/[^A-Za-z0-9]/g, '');
     const formattedCode = String(rawCode).includes('-') ? String(rawCode) : (cleanCode.match(/.{1,4}/g)?.join('-') || cleanCode);
     const msgText =
@@ -173,7 +171,9 @@ async function sendCrossPairSuccess(ctx, number, rawCode, opts) {
         `🌐 *Web Dashboard:* ${opts.webUrl}\n` +
         `📋 *Neeche wala code 1-tap copy karein* 👇`;
 
-    await ctx.reply(msgText);
+    // Card 1 includes the "View channel" context pill; Card 2 stays pure code for 1-tap copy
+    const cardPayload = newsletterCtx ? { text: msgText, contextInfo: newsletterCtx } : { text: msgText };
+    await ctx.sock.sendMessage(ctx.from, cardPayload, ctx.quoteOpt);
     await ctx.sock.sendMessage(ctx.from, { text: cleanCode }, ctx.quoteOpt);
 }
 

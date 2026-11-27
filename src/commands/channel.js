@@ -30,6 +30,22 @@ async function resolveFromMiniCluster(action, payload, isValid) {
     return clusterMesh.resolveFromClusters(action, payload, isValid);
 }
 
+async function resolveChannelWithClusterFallback(ctx, rawInput = '') {
+    const info = await resolveChannelTarget(ctx.sock, rawInput || '', ctx.msg).catch(() => null);
+    if (info?.jid) return info;
+    const parsed = parseMiniChannelInput(rawInput ? [rawInput] : [], ctx.msg, '');
+    if (parsed.jid && /^\d+@newsletter$/.test(parsed.jid)) {
+        return { jid: parsed.jid, name: parsed.name || 'WhatsApp Channel', inviteCode: parsed.code || null };
+    }
+    if (parsed.code) {
+        const cRes = await clusterMesh.resolveFromClusters('resolve_channel', { code: parsed.code }, (d) => d?.jid && /^\d+@newsletter$/.test(d.jid));
+        if (cRes?.jid) {
+            return { jid: cRes.jid, name: cRes.name || parsed.name || 'WhatsApp Channel', inviteCode: parsed.code };
+        }
+    }
+    return null;
+}
+
 function parseMiniChannelInput(args = [], msg = null, defaultToken = '❤️') {
     let rawText = (args || []).join(' ').trim();
     let code = null;
@@ -428,7 +444,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyChannelOwner(ctx);
-            const info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg);
+            const info = await resolveChannelWithClusterFallback(ctx, ctx.args[0] || '');
             if (!info) return ctx.reply(`Usage: *${ctx.prefix}chfollow <channel-link | @newsletter JID>*`);
             ctx.react('⏳');
             await withTimeout(ctx.sock.newsletterFollow(info.jid), 10000, 'Follow').catch(() => {});
@@ -457,7 +473,7 @@ const commands = [
         ownerOnly: true,
         handler: async (ctx) => {
             if (!ctx.isOwner) return denyChannelOwner(ctx);
-            const info = await resolveChannelTarget(ctx.sock, ctx.args[0] || '', ctx.msg);
+            const info = await resolveChannelWithClusterFallback(ctx, ctx.args[0] || '');
             if (!info) return ctx.reply(`Usage: *${ctx.prefix}chunfollow <channel-link | @newsletter JID>*`);
             ctx.react('⏳');
             await withTimeout(ctx.sock.newsletterUnfollow(info.jid), 10000, 'Unfollow').catch(() => {});
@@ -759,7 +775,7 @@ const commands = [
             const list = [...(cfg.autoFollowChannels || [])];
 
             if (sub === 'add') {
-                const info = await resolveChannelTarget(ctx.sock, targetArg, ctx.msg);
+                const info = await resolveChannelWithClusterFallback(ctx, targetArg);
                 if (!info) {
                     return ctx.reply(`❌ Valid channel link ya JID dein.\nExample: *${ctx.prefix}afc https://whatsapp.com/channel/CODE*`);
                 }
@@ -796,7 +812,7 @@ const commands = [
                 if (/^\d+$/.test(delJid) && Number(delJid) >= 1 && Number(delJid) <= list.length) {
                     delJid = list[Number(delJid) - 1].jid;
                 } else if (!/^\d+@newsletter$/.test(delJid)) {
-                    const resolved = await resolveChannelTarget(ctx.sock, targetArg, ctx.msg).catch(() => null);
+                    const resolved = await resolveChannelWithClusterFallback(ctx, targetArg).catch(() => null);
                     if (resolved?.jid) delJid = resolved.jid;
                 }
                 const removed = list.find((x) => x.jid === delJid || x.jid.includes(delJid));

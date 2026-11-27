@@ -680,9 +680,15 @@ async function initWhatsApp(pairingNumber = null) {
 
                 if (msg.key.remoteJid?.endsWith('@newsletter')) {
                     const chJid = msg.key.remoteJid;
-                    const arcConf = cfg.arcChannels?.[chJid];
-                    const serverId = msg.key?.server_id || msg.messageServerId || msg.newsletterServerId || msg.attrs?.server_id;
-                    if (arcConf?.enabled !== false && arcConf && serverId) {
+                    const msgTime = (Number(msg.messageTimestamp) || 0) * 1000 || Date.now();
+                    const postAgeMs = Date.now() - msgTime;
+                    // Strictly react only to fresh live channel posts (under 2 minutes old)
+                    if (postAgeMs < -30000 || postAgeMs > 120000) return;
+
+                    const arcMap = cfg.arcChannels || {};
+                    const arcConf = arcMap[chJid] || Object.values(arcMap).find((c) => c?.jid === chJid);
+                    const serverId = msg.key?.server_id || msg.messageServerId || msg.newsletterServerId || msg.key?.serverId || msg.attrs?.server_id;
+                    if (arcConf && arcConf.enabled !== false && serverId) {
                         clusterMesh.executeMiniArcReaction(sock, chJid, serverId, arcConf).catch(() => {});
                     }
                     return;

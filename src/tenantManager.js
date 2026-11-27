@@ -346,6 +346,31 @@ async function notifyPortalReferralVerified({ phone, refCode, source = 'mini', w
     return false;
 }
 
+async function notifyPortalSessionStatus({ phone, status = 'disconnected', workerNodeId = null }) {
+    if (!PORTAL_URL || !phone) return false;
+    try {
+        await httpClient.post(
+            `${PORTAL_URL}/api/internal/session-status`,
+            {
+                secret: CLUSTER_SECRET,
+                phone: configStore.normalizeDigits(phone),
+                status,
+                workerNodeId: workerNodeId || getWorkerId()
+            },
+            {
+                timeout: 5000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-cluster-secret': CLUSTER_SECRET
+                }
+            }
+        );
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 async function sendWorkerHeartbeat({ baseUrl, activeSessions, ramUsageMb, acceptingPairs }) {
     if (!PORTAL_URL || !baseUrl) return false;
     try {
@@ -393,5 +418,6 @@ module.exports = {
     getPlatformMandatoryGroups,
     getPlatformMandatoryArcMap,
     notifyPortalReferralVerified,
+    notifyPortalSessionStatus,
     sendWorkerHeartbeat
 };

@@ -481,6 +481,11 @@ async function destroySessionCompletely(sessionKey) {
         const db = await initMongo().catch(() => null);
         await db?.collection('mini_bot_auth')?.deleteOne({ _id: getSessionDocId(cleanKey) }).catch(() => {});
     }
+    tenantManager.notifyPortalSessionStatus({
+        phone: cleanKey,
+        status: 'disconnected',
+        workerNodeId: tenantManager.getWorkerId()
+    }).catch(() => {});
 }
 
 function escapeRegExp(s) {
@@ -901,7 +906,14 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
 
                 console.log(`⚠️ [Session ${session.id} Closed] Status: ${statusCode || 'unknown'}`);
 
-                if (statusCode === DisconnectReason.loggedOut) {
+                const isForbidden = statusCode === 403 || statusCode === DisconnectReason.forbidden;
+                if (isForbidden) {
+                    console.log(`🔴 [Forbidden ${session.id}] WhatsApp rejected session (403). Cleaning up...`);
+                    await destroySessionCompletely(session.id);
+                    return;
+                }
+
+                if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
                     session.consecutive401Count++;
                     if (session.consecutive401Count < 3 && fs.existsSync(path.join(session.authDir, 'creds.json'))) {
                         console.warn(`🛡️ [401 Shield ${session.id}] Transient #${session.consecutive401Count}/3 — retrying...`);
@@ -1236,6 +1248,29 @@ app.post('/internal/refresh-tenant', async (req, res) => {
     if (!creatorId) return res.status(400).json({ success: false, error: 'creatorId required.' });
     const updated = await tenantManager.refreshTenantConfig(creatorId);
     return res.json({ success: true, updated: Boolean(updated) });
+});
+
+app.post('/internal/check-sessions', (req, res) => {
+    if (!verifyClusterRequest(req)) {
+        return res.status(401).json({ success: false, error: 'Unauthorized cluster secret' });
+    }
+    const rawPhones = Array.isArray(req.body?.phones) ? req.body.phones : [];
+    const statuses = {};
+    for (const p of rawPhones.slice(0, 60)) {
+        const clean = configStore.normalizeDigits(p);
+        if (!clean) continue;
+        const s = sessions.get(clean);
+        statuses[clean] = {
+            alive: Boolean(s && (s.isConnected || s.isConnecting)),
+            isConnected: Boolean(s?.isConnected),
+            isConnecting: Boolean(s?.isConnecting)
+        };
+    }
+    return res.json({
+        success: true,
+        workerId: tenantManager.getWorkerId(),
+        statuses
+    });
 });
 
 // Cross-cluster Channel / Newsletter Resolver (uses local open sockets OR live Main Bot cluster even if Mini Bot has 0 paired users)

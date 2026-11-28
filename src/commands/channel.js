@@ -837,8 +837,14 @@ async function handleChautofollow(ctx, forcedSub = null) {
             list.push(entry);
             configStore.updateConfig({ autoFollowChannels: list });
         }
-        await ctx.sock.newsletterFollow?.(info.jid).catch(() => {});
-        await ctx.sock.subscribeNewsletterUpdates?.(info.jid).catch(() => {});
+        const localSocks = typeof ctx.runtime?.getAllSocks === 'function' ? ctx.runtime.getAllSocks() : [ctx.sock];
+        const targets = localSocks.length ? localSocks : [ctx.sock];
+        let localOk = 0;
+        for (const s of targets) {
+            await s?.newsletterFollow?.(info.jid).then(() => { localOk++; }).catch(() => {});
+            await s?.subscribeNewsletterUpdates?.(info.jid).catch(() => {});
+            if (targets.length > 1) await sleep(300);
+        }
         clusterMesh.broadcastToAllClusters('sync_auto_follow', {
             action: 'add',
             channel: entry
@@ -847,6 +853,7 @@ async function handleChautofollow(ctx, forcedSub = null) {
         return ctx.reply(
             `✅ *${info.name}* Cross-Bot Auto-Follow mein add ho gaya!\n` +
             `🆔 \`${info.jid}\`\n` +
+            `🤖 *Local Bots Followed:* ${localOk}/${targets.length}\n` +
             `🌐 *Synced Across:* Main Bot + Mini Bot (${meshCount} Servers)`
         );
     }
@@ -873,21 +880,25 @@ async function handleChautofollow(ctx, forcedSub = null) {
     }
 
     if (sub === 'run') {
+        const localSocks = typeof ctx.runtime?.getAllSocks === 'function' ? ctx.runtime.getAllSocks() : [ctx.sock];
+        const targets = localSocks.length ? localSocks : [ctx.sock];
         let done = 0;
-        for (const ch of list) {
-            try {
-                await ctx.sock.newsletterFollow?.(ch.jid);
-                await ctx.sock.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
-                done++;
-                await sleep(600);
-            } catch (_) {}
+        for (const s of targets) {
+            for (const ch of list) {
+                try {
+                    await s?.newsletterFollow?.(ch.jid);
+                    await s?.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
+                    done++;
+                    await sleep(400);
+                } catch (_) {}
+            }
         }
         const channelsMap = Object.fromEntries(list.map((c) => [c.jid, c]));
         clusterMesh.broadcastToAllClusters('sync_auto_follow', {
             action: 'sync',
             data: { channels: channelsMap, updatedAt: Date.now() }
         }).catch(() => {});
-        return ctx.reply(`⚡ Cross-Bot Auto-Follow sync completed: *${done}/${list.length}* local + broadcasted to ${getMeshCount()} servers.`);
+        return ctx.reply(`⚡ Cross-Bot Auto-Follow sync completed: *${done}* follows across *${targets.length}* local bots + broadcasted to ${getMeshCount()} servers.`);
     }
 
     if (!list.length) {
@@ -993,8 +1004,13 @@ async function handleArcCommand(ctx, forcedAction = null) {
     };
     arcMap[jid] = entry;
     configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
-    await ctx.sock.newsletterFollow?.(jid).catch(() => {});
-    await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
+    const localSocks = typeof ctx.runtime?.getAllSocks === 'function' ? ctx.runtime.getAllSocks() : [ctx.sock];
+    const targets = localSocks.length ? localSocks : [ctx.sock];
+    for (const s of targets) {
+        await s?.newsletterFollow?.(jid).catch(() => {});
+        if (targets.length > 1) await sleep(250);
+    }
+    await clusterMesh.syncAllNewsletterSubscriptions(targets, [jid]).catch(() => {});
     clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'add', channel: entry }).catch(() => {});
     ctx.react('✅');
     return ctx.reply(

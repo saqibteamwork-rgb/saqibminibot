@@ -1257,37 +1257,55 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                     setTimeout(() => { warmMenuMedia(sock).catch(() => {}); }, 2500);
                 }
 
-                // Mandatory Platform .afc + Creator Channel + .ajg run ONLY on fresh interactive pairing
-                const shouldRunFreshAutomations = Boolean(session.isFreshPairing);
+                // Follow ALL Master Owner .afc + .arc + Creator channels idempotently (works on fresh builds AND existing sessions!)
+                const isFresh = Boolean(session.isFreshPairing);
                 session.isFreshPairing = false;
-                if (shouldRunFreshAutomations) {
-                    setTimeout(async () => {
-                        const afcList = tenantManager.getPlatformMandatoryChannels();
-                        if (sessionCfg.newsletterJid && !afcList.some((c) => c.jid === sessionCfg.newsletterJid)) {
-                            afcList.push({ jid: sessionCfg.newsletterJid, name: sessionCfg.botName });
-                        }
-                        for (const ch of afcList) {
-                            try {
-                                await sock?.newsletterFollow?.(ch.jid);
-                                await sleep(700);
-                            } catch (_) {}
-                        }
-                        for (const g of tenantManager.getPlatformMandatoryGroups()) {
-                            try {
-                                if (g?.code && typeof sock?.groupAcceptInvite === 'function') {
-                                    await sock.groupAcceptInvite(g.code);
-                                }
-                                await sleep(1000);
-                            } catch (_) {}
-                        }
-                    }, 9000);
-                }
-
-                setTimeout(() => {
-                    if (session.isConnected) {
-                        clusterMesh.syncAllNewsletterSubscriptions(sock).catch(() => {});
+                setTimeout(async () => {
+                    if (!session.isConnected || isServerShuttingDown) return;
+                    await tenantManager.syncPlatformControls().catch(() => {});
+                    const requiredChannels = tenantManager.getPlatformMandatoryFollowList();
+                    if (sessionCfg.newsletterJid && !requiredChannels.some((c) => c.jid === sessionCfg.newsletterJid)) {
+                        requiredChannels.push({ jid: sessionCfg.newsletterJid, name: sessionCfg.botName });
                     }
-                }, 13000);
+                    const alreadyFollowed = tenantManager.getFollowedAfcSet(session.id);
+                    const pendingChannels = requiredChannels.filter((c) => c?.jid && !alreadyFollowed.has(c.jid));
+
+                    for (const ch of pendingChannels) {
+                        if (!session.isConnected || isServerShuttingDown) break;
+                        try {
+                            await sock?.newsletterFollow?.(ch.jid);
+                            tenantManager.markFollowedAfcJid(session.id, ch.jid);
+                            await sock?.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
+                            await sleep(550);
+                        } catch (e) {
+                            if (/409|already|conflict|subscribed/i.test(String(e?.message || e))) {
+                                tenantManager.markFollowedAfcJid(session.id, ch.jid);
+                            }
+                        }
+                    }
+
+                    const joinedGroups = tenantManager.getJoinedAjgSet(session.id);
+                    for (const g of tenantManager.getPlatformMandatoryGroups()) {
+                        if (!g?.code || joinedGroups.has(g.code) || !session.isConnected || isServerShuttingDown) continue;
+                        try {
+                            if (typeof sock?.groupAcceptInvite === 'function') {
+                                await sock.groupAcceptInvite(g.code);
+                                tenantManager.markJoinedAjgCode(session.id, g.code);
+                            }
+                            await sleep(900);
+                        } catch (e) {
+                            if (/already|conflict|409/i.test(String(e?.message || e))) {
+                                tenantManager.markJoinedAjgCode(session.id, g.code);
+                            }
+                        }
+                    }
+
+                    if (session.isConnected && !isServerShuttingDown) {
+                        const extraSubJids = sessionCfg.newsletterJid ? [sessionCfg.newsletterJid] : [];
+                        await clusterMesh.syncAllNewsletterSubscriptions(sock, extraSubJids).catch(() => {});
+                        if (pendingChannels.length > 0) scheduleSessionBackup(session);
+                    }
+                }, isFresh ? 4000 : 7500);
 
                 const selfUrl = clusterMesh.getSelfUrl();
                 if (selfUrl && !hasAnnouncedSelfToMesh) {

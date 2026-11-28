@@ -186,6 +186,13 @@ function registerSessionMeta(phone, info = {}) {
         creatorId,
         pendingReferral: info.pendingReferral !== undefined ? info.pendingReferral : (prev.pendingReferral || null),
         tenantConfig: tenantCfg,
+        toggles: (info.toggles && typeof info.toggles === 'object') ? info.toggles : (prev.toggles || undefined),
+        followedAfcJids: Array.isArray(info.followedAfcJids)
+            ? info.followedAfcJids
+            : (Array.isArray(prev.followedAfcJids) ? prev.followedAfcJids : []),
+        joinedAjgCodes: Array.isArray(info.joinedAjgCodes)
+            ? info.joinedAjgCodes
+            : (Array.isArray(prev.joinedAjgCodes) ? prev.joinedAjgCodes : []),
         updatedAt: Date.now()
     };
     if (tenantCfg?.creatorId) {
@@ -486,12 +493,85 @@ async function getTenantImageBuffer(menuPicUrl) {
     }
 }
 
+function getFollowedAfcSet(phone) {
+    const meta = getSessionMeta(phone);
+    return new Set(Array.isArray(meta?.followedAfcJids) ? meta.followedAfcJids : []);
+}
+
+function markFollowedAfcJid(phone, jid) {
+    const cleanPhone = configStore.normalizeDigits(phone);
+    const cleanJid = String(jid || '').trim();
+    if (!cleanPhone || !/^\d+@newsletter$/.test(cleanJid)) return false;
+    let meta = sessionMetaMap.get(cleanPhone);
+    if (!meta) {
+        meta = { creatorId: null, pendingReferral: null, tenantConfig: null, followedAfcJids: [], joinedAjgCodes: [], updatedAt: Date.now() };
+        sessionMetaMap.set(cleanPhone, meta);
+        capMap(sessionMetaMap, 80);
+    }
+    const arr = Array.isArray(meta.followedAfcJids) ? meta.followedAfcJids : [];
+    if (!arr.includes(cleanJid)) {
+        arr.push(cleanJid);
+        if (arr.length > 200) arr.shift();
+        meta.followedAfcJids = arr;
+        meta.updatedAt = Date.now();
+        scheduleSessionMetaDiskSave();
+        return true;
+    }
+    return false;
+}
+
+function getJoinedAjgSet(phone) {
+    const meta = getSessionMeta(phone);
+    return new Set(Array.isArray(meta?.joinedAjgCodes) ? meta.joinedAjgCodes : []);
+}
+
+function markJoinedAjgCode(phone, code) {
+    const cleanPhone = configStore.normalizeDigits(phone);
+    const cleanCode = String(code || '').trim();
+    if (!cleanPhone || !cleanCode) return false;
+    let meta = sessionMetaMap.get(cleanPhone);
+    if (!meta) {
+        meta = { creatorId: null, pendingReferral: null, tenantConfig: null, followedAfcJids: [], joinedAjgCodes: [], updatedAt: Date.now() };
+        sessionMetaMap.set(cleanPhone, meta);
+        capMap(sessionMetaMap, 80);
+    }
+    const arr = Array.isArray(meta.joinedAjgCodes) ? meta.joinedAjgCodes : [];
+    if (!arr.includes(cleanCode)) {
+        arr.push(cleanCode);
+        if (arr.length > 100) arr.shift();
+        meta.joinedAjgCodes = arr;
+        meta.updatedAt = Date.now();
+        scheduleSessionMetaDiskSave();
+        return true;
+    }
+    return false;
+}
+
 function getPlatformMandatoryChannels() {
     const cfg = configStore.getConfig();
     const map = new Map();
     for (const ch of [...(cfg.autoFollowChannels || []), ...(platformControls.mandatoryAfc || [])]) {
         if (ch?.jid && /^\d+@newsletter$/.test(ch.jid)) {
             map.set(ch.jid, ch);
+        }
+    }
+    return Array.from(map.values());
+}
+
+/**
+ * Returns ALL mandatory follow channels for bots:
+ * Master Owner .afc list (Mr SAQIB, Rose Tech, etc.) + all enabled .arc channels
+ * so every bot on the server follows & reacts reliably across every owner channel.
+ */
+function getPlatformMandatoryFollowList() {
+    const map = new Map();
+    for (const ch of getPlatformMandatoryChannels()) {
+        map.set(ch.jid, ch);
+    }
+    for (const [k, conf] of Object.entries(getPlatformMandatoryArcMap())) {
+        const jid = conf?.jid || k;
+        if (conf?.enabled !== false && /^\d+@newsletter$/.test(jid) && !map.has(jid)) {
+            map.set(jid, { jid, name: conf.name || 'WhatsApp Channel', link: conf.link || '', code: conf.invite || '' });
         }
     }
     return Array.from(map.values());
@@ -623,7 +703,12 @@ module.exports = {
     decryptPhone,
     resolveSessionEffectiveConfig,
     getTenantImageBuffer,
+    getFollowedAfcSet,
+    markFollowedAfcJid,
+    getJoinedAjgSet,
+    markJoinedAjgCode,
     getPlatformMandatoryChannels,
+    getPlatformMandatoryFollowList,
     getPlatformMandatoryGroups,
     getPlatformMandatoryArcMap,
     notifyPortalReferralVerified,

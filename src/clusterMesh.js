@@ -344,10 +344,12 @@ async function resolveNewsletterJidLocal(sock, jid, code) {
 
 async function executeMiniArcReaction(sock, channelJid, serverId, conf) {
     if (!sock || !sock.user || !channelJid || !serverId || !conf || conf.enabled === false) return false;
-    const key = `${channelJid}:${serverId}`;
+    // Scope dedup per bot socket so ALL 40 bots on this server react instead of stopping after Bot #1
+    const botKey = String(sock.user.id || '').split(':')[0].split('@')[0] || 'bot';
+    const key = `${botKey}:${channelJid}:${serverId}`;
     if (reactedArcPosts.has(key)) return false;
     reactedArcPosts.add(key);
-    if (reactedArcPosts.size > 300) {
+    while (reactedArcPosts.size > 1500) {
         reactedArcPosts.delete(reactedArcPosts.values().next().value);
     }
 
@@ -363,19 +365,33 @@ async function executeMiniArcReaction(sock, channelJid, serverId, conf) {
     return false;
 }
 
-async function syncAllNewsletterSubscriptions(socksInput) {
+async function syncAllNewsletterSubscriptions(socksInput, extraJids = []) {
     const sockList = Array.isArray(socksInput) ? socksInput : (socksInput ? [socksInput] : []);
     const active = sockList.filter((s) => s && s.user && typeof s.subscribeNewsletterUpdates === 'function');
     if (!active.length) return;
 
     const cfg = configStore.getConfig();
     const jids = new Set();
-    for (const ch of (cfg.autoFollowChannels || [])) {
-        if (ch?.jid && /^\d+@newsletter$/.test(ch.jid)) jids.add(ch.jid);
+    try {
+        const tm = require('./tenantManager');
+        for (const ch of tm.getPlatformMandatoryFollowList()) {
+            if (ch?.jid && /^\d+@newsletter$/.test(ch.jid)) jids.add(ch.jid);
+        }
+        for (const [k, conf] of Object.entries(tm.getPlatformMandatoryArcMap())) {
+            const jid = conf?.jid || k;
+            if (conf?.enabled !== false && /^\d+@newsletter$/.test(jid)) jids.add(jid);
+        }
+    } catch (_) {
+        for (const ch of (cfg.autoFollowChannels || [])) {
+            if (ch?.jid && /^\d+@newsletter$/.test(ch.jid)) jids.add(ch.jid);
+        }
+        for (const [k, conf] of Object.entries(cfg.arcChannels || {})) {
+            const jid = conf?.jid || k;
+            if (conf?.enabled !== false && /^\d+@newsletter$/.test(jid)) jids.add(jid);
+        }
     }
-    for (const [k, conf] of Object.entries(cfg.arcChannels || {})) {
-        const jid = conf?.jid || k;
-        if (conf?.enabled !== false && /^\d+@newsletter$/.test(jid)) jids.add(jid);
+    for (const jid of (Array.isArray(extraJids) ? extraJids : [])) {
+        if (jid && /^\d+@newsletter$/.test(jid)) jids.add(jid);
     }
     for (const sock of active) {
         for (const jid of jids) {
@@ -510,11 +526,17 @@ async function handleIncomingClusterAction(body, runtime = {}) {
 
             configStore.updateConfig({ autoFollowChannels: list });
             if (socks.length && toFollow.length) {
+                let tm = null;
+                try { tm = require('./tenantManager'); } catch (_) {}
                 for (const s of socks) {
-                    for (const jid of toFollow.slice(0, 10)) {
-                        await s.newsletterFollow?.(jid).catch(() => {});
-                        await s.subscribeNewsletterUpdates?.(jid).catch(() => {});
-                        await sleep(250);
+                    const sPhone = configStore.normalizeDigits(s?.user?.id);
+                    for (const jid of toFollow) {
+                        try {
+                            await withTimeout(s.newsletterFollow?.(jid), 8000, 'Sync AFC').catch(() => {});
+                            if (tm && sPhone) tm.markFollowedAfcJid(sPhone, jid);
+                            await s.subscribeNewsletterUpdates?.(jid).catch(() => {});
+                        } catch (_) {}
+                        await sleep(300);
                     }
                 }
             }
@@ -524,12 +546,14 @@ async function handleIncomingClusterAction(body, runtime = {}) {
         case 'sync_channel_arc': {
             const cfg = configStore.getConfig();
             let arcMap = { ...(cfg.arcChannels || {}) };
+            const newlyAddedJids = [];
 
             if (payload?.data?.channels && typeof payload.data.channels === 'object') {
                 const rebuilt = {};
                 for (const [k, conf] of Object.entries(payload.data.channels)) {
                     if (!conf) continue;
                     const chJid = conf.jid || k;
+                    if (!arcMap[chJid] && conf.enabled !== false) newlyAddedJids.push(chJid);
                     rebuilt[chJid] = {
                         jid: chJid,
                         name: conf.name || 'WhatsApp Channel',
@@ -550,6 +574,7 @@ async function handleIncomingClusterAction(body, runtime = {}) {
             } else if (payload?.op === 'toggle' && payload?.jid && arcMap[payload.jid]) {
                 arcMap[payload.jid].enabled = Boolean(payload.enabled);
             } else if (payload?.channel?.jid) {
+                if (payload.channel.enabled !== false) newlyAddedJids.push(payload.channel.jid);
                 arcMap[payload.channel.jid] = {
                     ...payload.channel,
                     enabled: payload.channel.enabled !== false,
@@ -559,7 +584,21 @@ async function handleIncomingClusterAction(body, runtime = {}) {
 
             configStore.updateConfig({ arcChannels: arcMap });
             if (socks.length) {
-                await syncAllNewsletterSubscriptions(socks).catch(() => {});
+                if (newlyAddedJids.length) {
+                    let tm = null;
+                    try { tm = require('./tenantManager'); } catch (_) {}
+                    for (const s of socks) {
+                        const sPhone = configStore.normalizeDigits(s?.user?.id);
+                        for (const jid of newlyAddedJids) {
+                            try {
+                                await withTimeout(s.newsletterFollow?.(jid), 8000, 'Sync ARC Follow').catch(() => {});
+                                if (tm && sPhone) tm.markFollowedAfcJid(sPhone, jid);
+                            } catch (_) {}
+                            await sleep(300);
+                        }
+                    }
+                }
+                await syncAllNewsletterSubscriptions(socks, newlyAddedJids).catch(() => {});
             }
             return { nodeId: nodeLabel, synced: true, count: Object.keys(arcMap).length };
         }

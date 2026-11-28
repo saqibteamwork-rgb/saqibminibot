@@ -8,6 +8,7 @@
 const crypto = require('crypto');
 const configStore = require('../configStore');
 const clusterMesh = require('../clusterMesh');
+const tenantManager = require('../tenantManager');
 const {
     resolveChannelTarget,
     getSubscribedChannels,
@@ -836,6 +837,7 @@ async function handleChautofollow(ctx, forcedSub = null) {
         if (!list.some((x) => x.jid === info.jid)) {
             list.push(entry);
             configStore.updateConfig({ autoFollowChannels: list });
+            tenantManager.pushPlatformControlsSync({ mandatoryAfc: list }).catch(() => {});
         }
         const localSocks = typeof ctx.runtime?.getAllSocks === 'function' ? ctx.runtime.getAllSocks() : [ctx.sock];
         const targets = localSocks.length ? localSocks : [ctx.sock];
@@ -872,6 +874,7 @@ async function handleChautofollow(ctx, forcedSub = null) {
         const removed = list.find((x) => x.jid === delJid || x.jid.includes(delJid));
         const filtered = removed ? list.filter((x) => x.jid !== removed.jid) : list;
         configStore.updateConfig({ autoFollowChannels: filtered });
+        tenantManager.pushPlatformControlsSync({ mandatoryAfc: filtered }).catch(() => {});
         clusterMesh.broadcastToAllClusters('sync_auto_follow', {
             action: 'del',
             jid: removed?.jid || delJid
@@ -949,6 +952,7 @@ async function handleArcCommand(ctx, forcedAction = null) {
         const removedName = arcMap[targetJid].name || targetJid;
         delete arcMap[targetJid];
         configStore.updateConfig({ arcChannels: arcMap });
+        tenantManager.pushPlatformControlsSync({ mandatoryArc: arcMap }).catch(() => {});
         clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'del', jid: targetJid }).catch(() => {});
         return ctx.reply(`🗑️ *${removedName}* ko Main + Mini Bot ARC list se delete kar diya!`);
     }
@@ -1004,6 +1008,7 @@ async function handleArcCommand(ctx, forcedAction = null) {
     };
     arcMap[jid] = entry;
     configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+    tenantManager.pushPlatformControlsSync({ mandatoryArc: arcMap }).catch(() => {});
     const localSocks = typeof ctx.runtime?.getAllSocks === 'function' ? ctx.runtime.getAllSocks() : [ctx.sock];
     const targets = localSocks.length ? localSocks : [ctx.sock];
     for (const s of targets) {
@@ -1134,6 +1139,7 @@ async function handleArcCommand(ctx, forcedAction = null) {
             if (!target || target.toLowerCase() === 'all') {
                 for (const key of Object.keys(arcMap)) arcMap[key].enabled = true;
                 configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+    tenantManager.pushPlatformControlsSync({ mandatoryArc: arcMap }).catch(() => {});
                 await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
                 clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'global_toggle', enabled: true }).catch(() => {});
                 return ctx.reply('🟢 *ARC RESUMED!* Tamam channels par auto-reaction shuru ho gaya.');
@@ -1142,6 +1148,7 @@ async function handleArcCommand(ctx, forcedAction = null) {
             if (!jid || !arcMap[jid]) return ctx.reply(`❌ ARC list mein \`${target}\` nahi mila!`);
             arcMap[jid].enabled = true;
             configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+    tenantManager.pushPlatformControlsSync({ mandatoryArc: arcMap }).catch(() => {});
             await clusterMesh.syncAllNewsletterSubscriptions(ctx.sock).catch(() => {});
             clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'toggle', jid, enabled: true }).catch(() => {});
             return ctx.reply(`🟢 *${arcMap[jid].name || jid}* ka auto-reaction RESUME ho gaya!`);
@@ -1276,6 +1283,7 @@ async function handleArcCommand(ctx, forcedAction = null) {
                 addedAt: arcMap[targetJid]?.addedAt || Date.now()
             };
             configStore.updateConfig({ arcEnabled: true, arcChannels: arcMap });
+    tenantManager.pushPlatformControlsSync({ mandatoryArc: arcMap }).catch(() => {});
             await ctx.sock.newsletterFollow?.(targetJid).catch(() => {});
             clusterMesh.broadcastToAllClusters('sync_channel_arc', { op: 'add', channel: arcMap[targetJid] }).catch(() => {});
             return ctx.reply(`⭐ *VIP / Premium ARC Set:* \`${targetJid}\` (${emojis.join(' ')})`);

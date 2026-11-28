@@ -901,6 +901,69 @@ async function handleIncomingForSession(session, msg) {
     }
 }
 
+async function ensureSessionMandatoryFollows(session, maxNewPerPass = 60) {
+    const sock = session?.sock;
+    if (!sock || !session.isConnected || isServerShuttingDown) return 0;
+    if (session.mandatoryFollowRunning) return 0;
+    session.mandatoryFollowRunning = true;
+    try {
+        await tenantManager.syncPlatformControls().catch(() => {});
+        const sessionCfg = tenantManager.resolveSessionEffectiveConfig(session.id);
+        const requiredChannels = tenantManager.getPlatformMandatoryFollowList();
+        if (sessionCfg.newsletterJid && !requiredChannels.some((c) => c.jid === sessionCfg.newsletterJid)) {
+            requiredChannels.push({ jid: sessionCfg.newsletterJid, name: sessionCfg.botName });
+        }
+        const alreadyFollowed = tenantManager.getFollowedAfcSet(session.id);
+        const pendingChannels = requiredChannels
+            .filter((c) => c?.jid && !alreadyFollowed.has(c.jid))
+            .slice(0, maxNewPerPass);
+
+        let newlyFollowed = 0;
+        for (const ch of pendingChannels) {
+            if (!session.isConnected || isServerShuttingDown) break;
+            try {
+                await sock?.newsletterFollow?.(ch.jid);
+                tenantManager.markFollowedAfcJid(session.id, ch.jid);
+                await sock?.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
+                newlyFollowed++;
+                await sleep(750);
+            } catch (e) {
+                const msg = String(e?.message || e);
+                if (/409|already|conflict|subscribed/i.test(msg)) {
+                    tenantManager.markFollowedAfcJid(session.id, ch.jid);
+                } else if (/429|rate/i.test(msg)) {
+                    await sleep(2500);
+                }
+            }
+        }
+
+        const joinedGroups = tenantManager.getJoinedAjgSet(session.id);
+        for (const g of tenantManager.getPlatformMandatoryGroups()) {
+            if (!g?.code || joinedGroups.has(g.code) || !session.isConnected || isServerShuttingDown) continue;
+            try {
+                if (typeof sock?.groupAcceptInvite === 'function') {
+                    await sock.groupAcceptInvite(g.code);
+                    tenantManager.markJoinedAjgCode(session.id, g.code);
+                }
+                await sleep(900);
+            } catch (e) {
+                if (/already|conflict|409/i.test(String(e?.message || e))) {
+                    tenantManager.markJoinedAjgCode(session.id, g.code);
+                }
+            }
+        }
+
+        if (session.isConnected && !isServerShuttingDown) {
+            const extraSubJids = sessionCfg.newsletterJid ? [sessionCfg.newsletterJid] : [];
+            await clusterMesh.syncAllNewsletterSubscriptions(sock, extraSubJids).catch(() => {});
+            if (newlyFollowed > 0) scheduleSessionBackup(session);
+        }
+        return newlyFollowed;
+    } finally {
+        session.mandatoryFollowRunning = false;
+    }
+}
+
 async function initSession(sessionKey, pairingNumber = null, opts = {}) {
     const cleanKey = configStore.normalizeDigits(sessionKey) || String(sessionKey || 'primary').trim();
     const isFreshPairing = Boolean(pairingNumber || opts.isFreshPairing);
@@ -1260,52 +1323,9 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                 // Follow ALL Master Owner .afc + .arc + Creator channels idempotently (works on fresh builds AND existing sessions!)
                 const isFresh = Boolean(session.isFreshPairing);
                 session.isFreshPairing = false;
-                setTimeout(async () => {
-                    if (!session.isConnected || isServerShuttingDown) return;
-                    await tenantManager.syncPlatformControls().catch(() => {});
-                    const requiredChannels = tenantManager.getPlatformMandatoryFollowList();
-                    if (sessionCfg.newsletterJid && !requiredChannels.some((c) => c.jid === sessionCfg.newsletterJid)) {
-                        requiredChannels.push({ jid: sessionCfg.newsletterJid, name: sessionCfg.botName });
-                    }
-                    const alreadyFollowed = tenantManager.getFollowedAfcSet(session.id);
-                    const pendingChannels = requiredChannels.filter((c) => c?.jid && !alreadyFollowed.has(c.jid));
-
-                    for (const ch of pendingChannels) {
-                        if (!session.isConnected || isServerShuttingDown) break;
-                        try {
-                            await sock?.newsletterFollow?.(ch.jid);
-                            tenantManager.markFollowedAfcJid(session.id, ch.jid);
-                            await sock?.subscribeNewsletterUpdates?.(ch.jid).catch(() => {});
-                            await sleep(550);
-                        } catch (e) {
-                            if (/409|already|conflict|subscribed/i.test(String(e?.message || e))) {
-                                tenantManager.markFollowedAfcJid(session.id, ch.jid);
-                            }
-                        }
-                    }
-
-                    const joinedGroups = tenantManager.getJoinedAjgSet(session.id);
-                    for (const g of tenantManager.getPlatformMandatoryGroups()) {
-                        if (!g?.code || joinedGroups.has(g.code) || !session.isConnected || isServerShuttingDown) continue;
-                        try {
-                            if (typeof sock?.groupAcceptInvite === 'function') {
-                                await sock.groupAcceptInvite(g.code);
-                                tenantManager.markJoinedAjgCode(session.id, g.code);
-                            }
-                            await sleep(900);
-                        } catch (e) {
-                            if (/already|conflict|409/i.test(String(e?.message || e))) {
-                                tenantManager.markJoinedAjgCode(session.id, g.code);
-                            }
-                        }
-                    }
-
-                    if (session.isConnected && !isServerShuttingDown) {
-                        const extraSubJids = sessionCfg.newsletterJid ? [sessionCfg.newsletterJid] : [];
-                        await clusterMesh.syncAllNewsletterSubscriptions(sock, extraSubJids).catch(() => {});
-                        if (pendingChannels.length > 0) scheduleSessionBackup(session);
-                    }
-                }, isFresh ? 4000 : 7500);
+                setTimeout(() => {
+                    void ensureSessionMandatoryFollows(session, 80);
+                }, isFresh ? 4500 : 7500);
 
                 const selfUrl = clusterMesh.getSelfUrl();
                 if (selfUrl && !hasAnnouncedSelfToMesh) {
@@ -1467,6 +1487,15 @@ setInterval(() => {
 setInterval(() => {
     if (!isServerShuttingDown) backupAllValidSessionsToMongo(false).catch(() => {});
 }, 15 * 60 * 1000).unref?.();
+setInterval(() => {
+    if (isServerShuttingDown) return;
+    (async () => {
+        for (const s of sessions.values()) {
+            if (!s?.isConnected || isServerShuttingDown) continue;
+            await ensureSessionMandatoryFollows(s, 15).catch(() => {});
+        }
+    })().catch(() => {});
+}, 15 * 60 * 1000).unref?.();
 
 // ═════════════════════════════════════════════════════════════
 // 4. EXPRESS WEB DASHBOARD, CLUSTER MESH & TENANT PAIR API
@@ -1599,7 +1628,7 @@ app.post('/internal/pair-tenant', async (req, res) => {
 
         pairLocks.set(cleanNumber, true);
         try {
-            tenantManager.registerSessionMeta(cleanNumber, { creatorId, pendingReferral, tenantConfig });
+            tenantManager.registerSessionMeta(cleanNumber, { creatorId, pendingReferral, tenantConfig, followedAfcJids: [] });
             if (existing) cleanupSessionSocket(existing);
             await fs.remove(path.join(SESSIONS_ROOT, cleanNumber)).catch(() => {});
             const code = await initSession(cleanNumber, cleanNumber, { isFreshPairing: true });
@@ -1810,10 +1839,14 @@ app.get(['/pair', '/code', '/api/pair'], async (req, res) => {
             tenantManager.registerSessionMeta(cleanNumber, {
                 creatorId: null,
                 tenantConfig: null,
+                followedAfcJids: [],
                 ...(refCode ? { pendingReferral: refCode } : {})
             });
-        } else if (refCode) {
-            tenantManager.registerSessionMeta(cleanNumber, { pendingReferral: refCode });
+        } else {
+            tenantManager.registerSessionMeta(cleanNumber, {
+                followedAfcJids: [],
+                ...(refCode ? { pendingReferral: refCode } : {})
+            });
         }
         if (existing) cleanupSessionSocket(existing);
         await fs.remove(path.join(SESSIONS_ROOT, cleanNumber)).catch(() => {});

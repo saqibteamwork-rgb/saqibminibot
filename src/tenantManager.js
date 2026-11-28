@@ -360,6 +360,26 @@ function applyPlatformControlRow(row) {
     };
 }
 
+async function pushPlatformControlsSync({ mandatoryAfc = null, mandatoryArc = null } = {}) {
+    if (!PORTAL_URL || !CLUSTER_SECRET) return false;
+    const payload = {};
+    if (Array.isArray(mandatoryAfc)) payload.mandatoryAfc = mandatoryAfc;
+    if (mandatoryArc && typeof mandatoryArc === 'object' && !Array.isArray(mandatoryArc)) payload.mandatoryArc = mandatoryArc;
+    if (!Object.keys(payload).length) return false;
+    try {
+        await httpClient.post(`${PORTAL_URL}/api/internal/bootstrap-config`, payload, {
+            timeout: 5000,
+            headers: {
+                'Content-Type': 'application/json',
+                'x-cluster-secret': CLUSTER_SECRET
+            }
+        });
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 async function syncPlatformControls() {
     // 1. Primary path: Works on 0-Config-Var Heroku dynos via authenticated Portal API
     const bootData = await fetchBootstrapFromPortal();
@@ -697,6 +717,7 @@ module.exports = {
     fetchCreatorConfigFromSupabase,
     refreshTenantConfig,
     syncPlatformControls,
+    pushPlatformControlsSync,
     isMasterOwner,
     isSessionOwner,
     setSessionToggle,

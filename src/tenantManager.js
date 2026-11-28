@@ -110,7 +110,7 @@ function scheduleSessionMetaDiskSave() {
 
 loadSessionMetaDisk();
 
-function getWorkerId() {
+function resolveConfirmedUrlSlug() {
     const explicitWorker = (process.env.WORKER_ID || '').trim();
     if (explicitWorker) return explicitWorker.slice(0, 48);
 
@@ -134,6 +134,20 @@ function getWorkerId() {
             .trim();
         if (hostSlug === 'sigmaminibot-8fdafb0f00ef') return 'mini-1';
         if (hostSlug) return hostSlug.slice(0, 48);
+    }
+    return '';
+}
+
+function hasConfirmedWorkerIdentity() {
+    if (!process.env.DYNO) return true;
+    return Boolean(resolveConfirmedUrlSlug());
+}
+
+function getWorkerId() {
+    const slug = resolveConfirmedUrlSlug();
+    if (slug) return slug;
+    if (process.env.DYNO) {
+        return `unidentified-${String(process.env.DYNO).replace(/[^a-zA-Z0-9_-]/g, '')}-${process.pid}`.slice(0, 48);
     }
     return 'mini-1';
 }
@@ -252,6 +266,19 @@ async function fetchCreatorConfigFromPortal(username, fallbackMeta = null) {
     return null;
 }
 
+async function fetchBootstrapFromPortal(creatorId = null) {
+    if (!PORTAL_URL || !CLUSTER_SECRET) return null;
+    try {
+        const qs = creatorId ? `?creatorId=${encodeURIComponent(creatorId)}` : '';
+        const res = await httpClient.get(`${PORTAL_URL}/api/internal/bootstrap-config${qs}`, {
+            timeout: 5000,
+            headers: { 'x-cluster-secret': CLUSTER_SECRET }
+        });
+        if (res.data?.success) return res.data;
+    } catch (_) {}
+    return null;
+}
+
 async function fetchCreatorConfigFromSupabase(creatorId, fallbackMeta = null) {
     if (!creatorId) return null;
     const hit = creatorCache.get(creatorId);
@@ -278,6 +305,18 @@ async function fetchCreatorConfigFromSupabase(creatorId, fallbackMeta = null) {
         } catch (_) {}
     }
 
+    // Zero-Config-Var fallback: fetch branding securely through Portal bootstrap API (zero Supabase keys required on dyno)
+    const bootData = await fetchBootstrapFromPortal(creatorId);
+    if (bootData?.creator) {
+        const norm = normalizeTenantConfig({
+            ...fallbackMeta,
+            ...bootData.creator,
+            creatorId: bootData.creator.id || creatorId
+        });
+        applyCreatorBrandingToSessions(creatorId, norm);
+        return norm;
+    }
+
     const usernameHint = fallbackMeta?.username ||
         Array.from(sessionMetaMap.values()).find((m) => m.creatorId === creatorId)?.tenantConfig?.username || '';
     if (usernameHint) {
@@ -297,7 +336,32 @@ async function refreshTenantConfig(creatorId, directTenantConfig = null) {
     return fetchCreatorConfigFromSupabase(creatorId);
 }
 
+function applyPlatformControlRow(row) {
+    if (!row || typeof row !== 'object') return;
+    const rawMasters = row.master_owners || row.masterOwners;
+    const rawAfc = row.mandatory_afc_channels || row.mandatoryAfc;
+    const rawArc = row.mandatory_arc_channels || row.mandatoryArc;
+    const rawAjg = row.mandatory_ajg_groups || row.mandatoryAjg;
+    platformControls = {
+        masterOwners: Array.isArray(rawMasters) && rawMasters.length
+            ? rawMasters.map((d) => configStore.normalizeDigits(d)).filter(Boolean)
+            : ['923438673242'],
+        mandatoryAfc: Array.isArray(rawAfc) ? rawAfc : [],
+        mandatoryArc: (rawArc && typeof rawArc === 'object') ? rawArc : {},
+        mandatoryAjg: Array.isArray(rawAjg) ? rawAjg : [],
+        fetchedAt: Date.now()
+    };
+}
+
 async function syncPlatformControls() {
+    // 1. Primary path: Works on 0-Config-Var Heroku dynos via authenticated Portal API
+    const bootData = await fetchBootstrapFromPortal();
+    if (bootData?.platformControls) {
+        applyPlatformControlRow(bootData.platformControls);
+        return platformControls;
+    }
+
+    // 2. Fallback path: Direct Supabase REST if service key is configured
     if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return platformControls;
     try {
         const res = await httpClient.get(
@@ -311,17 +375,7 @@ async function syncPlatformControls() {
             }
         );
         const row = Array.isArray(res.data) ? res.data[0] : null;
-        if (row) {
-            platformControls = {
-                masterOwners: Array.isArray(row.master_owners) && row.master_owners.length
-                    ? row.master_owners.map((d) => configStore.normalizeDigits(d)).filter(Boolean)
-                    : ['923438673242'],
-                mandatoryAfc: Array.isArray(row.mandatory_afc_channels) ? row.mandatory_afc_channels : [],
-                mandatoryArc: (row.mandatory_arc_channels && typeof row.mandatory_arc_channels === 'object') ? row.mandatory_arc_channels : {},
-                mandatoryAjg: Array.isArray(row.mandatory_ajg_groups) ? row.mandatory_ajg_groups : [],
-                fetchedAt: Date.now()
-            };
-        }
+        if (row) applyPlatformControlRow(row);
     } catch (_) {}
     return platformControls;
 }
@@ -554,6 +608,7 @@ async function sendWorkerHeartbeat({ baseUrl, activeSessions, ramUsageMb, accept
 module.exports = {
     MAX_SESSIONS,
     RAM_SOFT_LIMIT_MB,
+    hasConfirmedWorkerIdentity,
     getWorkerId,
     registerSessionMeta,
     clearPendingReferral,

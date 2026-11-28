@@ -147,6 +147,7 @@ const sessions = new Map();
 const pairLocks = new Map();
 let isServerShuttingDown = false;
 let startupRestoreInProgress = true;
+let lateCloudRestoreStarted = false;
 
 let cachedBaileysVersion = Array.isArray(DEFAULT_CONNECTION_CONFIG?.version) ? DEFAULT_CONNECTION_CONFIG.version : [2, 3000, 1043857760];
 let versionRefreshStarted = false;
@@ -525,6 +526,10 @@ async function backupAllValidSessionsToMongo(forceWait = false) {
 
 async function restoreAllSessionsFromCloud() {
     try {
+        if (!tenantManager.hasConfirmedWorkerIdentity()) {
+            console.log('⏳ [Zero-Config Boot] Waiting for first HTTP request to confirm worker URL before cloud restore.');
+            return [];
+        }
         const db = await initMongo();
         if (!db) return [];
 
@@ -1449,13 +1454,64 @@ setInterval(() => {
 // 4. EXPRESS WEB DASHBOARD, CLUSTER MESH & TENANT PAIR API
 // ═════════════════════════════════════════════════════════════
 
+async function bootRestoredSessionsFromDisk() {
+    const entries = await fs.readdir(SESSIONS_ROOT).catch(() => []);
+    const masterSet = new Set(configStore.getConfig().owners || []);
+    const validKeys = [];
+    for (const dirName of entries) {
+        if (sessions.has(dirName)) continue;
+        const credsPath = path.join(SESSIONS_ROOT, dirName, 'creds.json');
+        if (!fs.existsSync(credsPath)) continue;
+        const raw = await fs.readFile(credsPath, 'utf8').catch(() => '');
+        if (isRegisteredCredsJson(raw)) validKeys.push(dirName);
+    }
+
+    validKeys.sort((a, b) => (masterSet.has(a) === masterSet.has(b) ? a.localeCompare(b) : (masterSet.has(a) ? -1 : 1)));
+    let booted = 0;
+    for (const key of validKeys.slice(0, Math.max(0, tenantManager.MAX_SESSIONS - sessions.size))) {
+        if (isServerShuttingDown) break;
+        if (getMemoryUsageMb() >= tenantManager.RAM_SOFT_LIMIT_MB) {
+            console.warn(`⚠️ [RAM Guard] Stopping boot restore at ${booted} sessions (${getMemoryUsageMb()}MB).`);
+            break;
+        }
+        if (booted > 0) await sleep(550);
+        booted++;
+        initSession(key, null, { isFreshPairing: false }).catch((err) => {
+            console.error(`❌ [Auto-Connect ${key}]:`, err.message);
+        });
+        if (booted % 8 === 0 && typeof global.gc === 'function') global.gc();
+    }
+    return booted;
+}
+
+async function handleLateSelfUrlDetected(detectedUrl) {
+    try {
+        console.log(`🌐 [Zero-Config Auto-Identity] Identified dyno URL: ${detectedUrl} (workerId=${tenantManager.getWorkerId()})`);
+        await tenantManager.syncPlatformControls().catch(() => {});
+        scheduleWorkerHeartbeat();
+        if (!startupRestoreInProgress && !lateCloudRestoreStarted && sessions.size === 0 && tenantManager.hasConfirmedWorkerIdentity()) {
+            lateCloudRestoreStarted = true;
+            await restoreAllSessionsFromCloud().catch(() => []);
+            const booted = await bootRestoredSessionsFromDisk().catch(() => 0);
+            if (booted > 0) {
+                console.log(`✅ [Zero-Config Auto-Identity] Restored & booted ${booted} sessions for ${tenantManager.getWorkerId()}.`);
+                scheduleWorkerHeartbeat();
+            }
+        }
+    } catch (_) {}
+}
+
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 app.use((req, _res, next) => {
     const fwdHost = req.headers['x-forwarded-host'] || req.headers.host;
     const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
     if (fwdHost && !/^(localhost|127\.0\.0\.1)/i.test(String(fwdHost))) {
-        clusterMesh.setDetectedSelfUrl(`${proto}://${String(fwdHost).split(',')[0].trim()}`);
+        const candidateUrl = `${proto}://${String(fwdHost).split(',')[0].trim()}`;
+        const changed = clusterMesh.setDetectedSelfUrl(candidateUrl);
+        if (changed) {
+            setImmediate(() => void handleLateSelfUrlDetected(candidateUrl));
+        }
     }
     next();
 });
@@ -1944,33 +2000,7 @@ app.listen(PORT, async () => {
         await migrateLegacyPrimaryDirIfNeeded();
         await initMongo().then((db) => db && configStore.loadConfig(db)).catch(() => {});
         await restoreAllSessionsFromCloud();
-
-        const entries = await fs.readdir(SESSIONS_ROOT).catch(() => []);
-        const masterSet = new Set(configStore.getConfig().owners || []);
-        const validKeys = [];
-        for (const dirName of entries) {
-            const credsPath = path.join(SESSIONS_ROOT, dirName, 'creds.json');
-            if (!fs.existsSync(credsPath)) continue;
-            const raw = await fs.readFile(credsPath, 'utf8').catch(() => '');
-            if (isRegisteredCredsJson(raw)) validKeys.push(dirName);
-        }
-
-        // Boot master owner sessions first, staggered cleanly by 550ms + periodic GC to keep RSS flat across 40 sessions
-        validKeys.sort((a, b) => (masterSet.has(a) === masterSet.has(b) ? a.localeCompare(b) : (masterSet.has(a) ? -1 : 1)));
-        let booted = 0;
-        for (const key of validKeys.slice(0, tenantManager.MAX_SESSIONS)) {
-            if (isServerShuttingDown) break;
-            if (getMemoryUsageMb() >= tenantManager.RAM_SOFT_LIMIT_MB) {
-                console.warn(`⚠️ [RAM Guard] Stopping boot restore at ${booted} sessions (${getMemoryUsageMb()}MB).`);
-                break;
-            }
-            if (booted > 0) await sleep(550);
-            booted++;
-            initSession(key, null, { isFreshPairing: false }).catch((err) => {
-                console.error(`❌ [Auto-Connect ${key}]:`, err.message);
-            });
-            if (booted % 8 === 0 && typeof global.gc === 'function') global.gc();
-        }
+        const booted = await bootRestoredSessionsFromDisk();
         if (booted === 0) {
             console.log('ℹ️ [Auth] No registered sessions yet. Ready to accept pairs.');
         }

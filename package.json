@@ -4,7 +4,7 @@
   "description": "SIGMA MD :: Ultra-lightweight 24/7 Zero-Sleep WhatsApp MD Bot for Heroku with 145+ Commands, Baileys v7 & Cloud Auth",
   "main": "index.js",
   "scripts": {
-    "start": "node --expose-gc --max-old-space-size=400 index.js"
+    "start": "node --expose-gc --max-old-space-size=260 --optimize-for-size index.js"
   },
   "keywords": [
     "whatsapp",

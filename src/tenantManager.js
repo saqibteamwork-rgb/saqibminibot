@@ -171,10 +171,10 @@ function registerSessionMeta(phone, info = {}) {
     };
     if (tenantCfg?.creatorId) {
         creatorCache.set(tenantCfg.creatorId, { ts: Date.now(), config: tenantCfg });
-        capMap(creatorCache, 200);
+        capMap(creatorCache, 80);
     }
     sessionMetaMap.set(cleanPhone, next);
-    capMap(sessionMetaMap, 120);
+    capMap(sessionMetaMap, 80);
     scheduleSessionMetaDiskSave();
     return next;
 }
@@ -420,7 +420,7 @@ async function getTenantImageBuffer(menuPicUrl) {
         const buf = Buffer.from(res.data);
         if (buf.length < 100) return null;
         imageLruCache.set(url, { ts: Date.now(), buf });
-        capMap(imageLruCache, 15);
+        capMap(imageLruCache, 8);
         return buf;
     } catch (_) {
         return null;

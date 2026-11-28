@@ -26,7 +26,6 @@ const { MongoClient } = require('mongodb');
 const {
     default: makeWASocket,
     DEFAULT_CONNECTION_CONFIG,
-    useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
@@ -38,6 +37,7 @@ const {
 const configStore = require('./src/configStore');
 const clusterMesh = require('./src/clusterMesh');
 const tenantManager = require('./src/tenantManager');
+const { useLeanFileAuthState } = require('./src/leanAuthState');
 const { installSoundStickerProtoPatch } = require('./src/soundStickerProto');
 installSoundStickerProtoPatch();
 const registry = require('./src/commands');
@@ -81,15 +81,16 @@ process.on('unhandledRejection', (reason) => {
 const silentLogger = pino({ level: 'fatal' });
 
 /**
- * Bounded LRU Signal Key Cache — prevents NodeCache unbounded growth across 40 sockets
+ * Bounded LRU Cache — drop-in replacement for @cacheable/node-cache across all 40 sockets
  */
 class BoundedSignalCache {
-    constructor(maxKeys = 250, ttlMs = 120000) {
+    constructor(maxKeys = 160, ttlMs = 120000) {
         this.maxKeys = maxKeys;
         this.ttlMs = ttlMs;
         this.store = new Map();
     }
     get(key) {
+        if (key == null) return undefined;
         const entry = this.store.get(key);
         if (!entry) return undefined;
         if (Date.now() > entry.exp) {
@@ -98,7 +99,17 @@ class BoundedSignalCache {
         }
         return entry.val;
     }
+    mget(keys) {
+        const out = {};
+        if (!Array.isArray(keys)) return out;
+        for (const k of keys) {
+            const v = this.get(k);
+            if (v !== undefined) out[k] = v;
+        }
+        return out;
+    }
     set(key, val) {
+        if (key == null) return false;
         if (this.store.has(key)) this.store.delete(key);
         this.store.set(key, { val, exp: Date.now() + this.ttlMs });
         while (this.store.size > this.maxKeys) {
@@ -107,10 +118,26 @@ class BoundedSignalCache {
         }
         return true;
     }
+    mset(entries) {
+        if (!Array.isArray(entries)) return false;
+        for (const item of entries) {
+            if (item && item.key !== undefined) this.set(item.key, item.value !== undefined ? item.value : item.val);
+        }
+        return true;
+    }
     del(key) {
         return this.store.delete(key);
     }
+    pruneExpired() {
+        const now = Date.now();
+        for (const [k, entry] of this.store.entries()) {
+            if (now > entry.exp) this.store.delete(k);
+        }
+    }
     flushAll() {
+        this.store.clear();
+    }
+    close() {
         this.store.clear();
     }
 }
@@ -128,15 +155,20 @@ let mongoClient = null;
 let mongoDb = null;
 let mongoConnecting = false;
 
-// Shared Bounded Caches across all worker sessions
+// Shared Bounded Caches shared across all 40 worker sessions (cuts 160 private NodeCaches down to 4)
+const sharedRetryCache = new BoundedSignalCache(200, 120000);
+const sharedUserDevicesCache = new BoundedSignalCache(500, 180000);
+const sharedPlaceholderCache = new BoundedSignalCache(120, 45000);
+const sharedCallOfferCache = new BoundedSignalCache(60, 120000);
+
 const messageStore = new Map();
 const processedMsgIds = new Set();
 const antideleteCache = new Map();
 const groupMetaCache = new Map();
 const inFlightGroupMeta = new Map();
-const GROUP_META_TTL_MS = 5 * 60 * 1000;
+const GROUP_META_TTL_MS = 3 * 60 * 1000;
 
-function capSet(set, key, max = 1000) {
+function capSet(set, key, max = 500) {
     set.add(key);
     if (set.size > max) {
         const first = set.values().next().value;
@@ -144,7 +176,7 @@ function capSet(set, key, max = 1000) {
     }
 }
 
-function capMap(map, key, val, max = 400) {
+function capMap(map, key, val, max = 140) {
     map.set(key, val);
     if (map.size > max) {
         const first = map.keys().next().value;
@@ -152,13 +184,47 @@ function capMap(map, key, val, max = 400) {
     }
 }
 
+function slimCachedMessage(msgContent) {
+    if (!msgContent || typeof msgContent !== 'object') return msgContent;
+    const msgType = Object.keys(msgContent)[0];
+    if (!msgType) return msgContent;
+    const inner = msgContent[msgType];
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return msgContent;
+    // Strip heavy jpegThumbnail / scansSidecar / quoted tree buffers to keep RAM tiny
+    const slimInner = { ...inner };
+    delete slimInner.jpegThumbnail;
+    delete slimInner.scansSidecar;
+    delete slimInner.midQualityFileSha256;
+    if (slimInner.contextInfo && typeof slimInner.contextInfo === 'object') {
+        const { quotedMessage: _qm, ...restCtx } = slimInner.contextInfo;
+        slimInner.contextInfo = restCtx;
+    }
+    return { [msgType]: slimInner };
+}
+
 function cacheMessage(msg) {
     if (!msg?.key?.id || !msg?.message) return;
-    const id = msg.key.id;
-    capMap(messageStore, id, msg.message, 400);
-    if (msg.key.remoteJid) {
-        capMap(messageStore, `${msg.key.remoteJid}:${id}`, msg.message, 400);
-    }
+    const slim = slimCachedMessage(msg.message);
+    capMap(messageStore, msg.key.id, slim, 140);
+}
+
+function slimGroupMetadata(meta) {
+    if (!meta || typeof meta !== 'object') return meta;
+    return {
+        id: meta.id,
+        subject: meta.subject,
+        owner: meta.owner,
+        size: meta.size,
+        desc: meta.desc ? String(meta.desc).slice(0, 300) : '',
+        participants: Array.isArray(meta.participants)
+            ? meta.participants.map((p) => ({
+                id: p.id,
+                lid: p.lid,
+                phoneNumber: p.phoneNumber,
+                admin: p.admin || null
+            }))
+            : []
+    };
 }
 
 async function getCachedGroupMeta(sock, jid) {
@@ -169,8 +235,9 @@ async function getCachedGroupMeta(sock, jid) {
 
     const p = (async () => {
         try {
-            const meta = await sock.groupMetadata(jid);
-            capMap(groupMetaCache, jid, { ts: Date.now(), meta }, 80);
+            const rawMeta = await sock.groupMetadata(jid);
+            const meta = slimGroupMetadata(rawMeta);
+            capMap(groupMetaCache, jid, { ts: Date.now(), meta }, 35);
             return meta;
         } catch (_) {
             return hit?.meta || null;
@@ -234,17 +301,32 @@ function isAcceptingNewPairs() {
 }
 
 function trimCaches() {
-    if (messageStore.size > 300) {
-        const excess = messageStore.size - 300;
-        let i = 0;
-        for (const k of messageStore.keys()) {
-            messageStore.delete(k);
-            if (++i >= excess) break;
+    while (messageStore.size > 100) {
+        messageStore.delete(messageStore.keys().next().value);
+    }
+    while (antideleteCache.size > 80) {
+        antideleteCache.delete(antideleteCache.keys().next().value);
+    }
+    while (groupMetaCache.size > 25) {
+        groupMetaCache.delete(groupMetaCache.keys().next().value);
+    }
+    if (processedMsgIds.size > 500) processedMsgIds.clear();
+    sharedRetryCache.pruneExpired();
+    sharedUserDevicesCache.pruneExpired();
+    sharedPlaceholderCache.pruneExpired();
+    sharedCallOfferCache.pruneExpired();
+    // Prune Baileys internal 3-day unbounded LIDMappingStore caches across all active sockets
+    for (const s of sessions.values()) {
+        s.signalKeyCache?.pruneExpired?.();
+        const mc = s?.sock?.signalRepository?.lidMapping?.mappingCache;
+        if (mc && typeof mc.size === 'number' && mc.size > 60) {
+            while (mc.size > 60) {
+                const oldestKey = mc.keys().next().value;
+                if (oldestKey === undefined) break;
+                mc.delete(oldestKey);
+            }
         }
     }
-    if (antideleteCache.size > 120) antideleteCache.clear();
-    if (groupMetaCache.size > 50) groupMetaCache.clear();
-    if (processedMsgIds.size > 800) processedMsgIds.clear();
     clearTtlCache();
 }
 
@@ -296,16 +378,16 @@ function filterLeanSessionFiles(authDir, filenames, statsMap = new Map()) {
     const sortNewest = (arr) => arr.sort((a, b) => (statsMap.get(b)?.mtimeMs || 0) - (statsMap.get(a)?.mtimeMs || 0));
     const creds = filenames.filter((f) => f === 'creds.json');
     const appState = filenames.filter((f) => f.startsWith('app-state-sync-key-'));
-    const lidMappings = sortNewest(filenames.filter((f) => f.startsWith('lid-mapping-'))).slice(0, 150);
-    const deviceLists = sortNewest(filenames.filter((f) => f.startsWith('device-list-'))).slice(0, 120);
-    const tcTokens = sortNewest(filenames.filter((f) => f.startsWith('tctoken-'))).slice(0, 90);
+    const lidMappings = sortNewest(filenames.filter((f) => f.startsWith('lid-mapping-'))).slice(0, 90);
+    const deviceLists = sortNewest(filenames.filter((f) => f.startsWith('device-list-'))).slice(0, 80);
+    const tcTokens = sortNewest(filenames.filter((f) => f.startsWith('tctoken-'))).slice(0, 50);
     const preKeys = filenames
         .filter((f) => f.startsWith('pre-key-'))
         .sort((a, b) => (parseInt(b.replace(/\D/g, ''), 10) || 0) - (parseInt(a.replace(/\D/g, ''), 10) || 0))
-        .slice(0, 60);
-    const senderKeys = sortNewest(filenames.filter((f) => f.startsWith('sender-key-') && !f.startsWith('sender-key-memory-'))).slice(0, 120);
-    const chatSessions = sortNewest(filenames.filter((f) => f.startsWith('session-'))).slice(0, 120);
-    const identityKeys = sortNewest(filenames.filter((f) => f.startsWith('identity-'))).slice(0, 60);
+        .slice(0, 45);
+    const senderKeys = sortNewest(filenames.filter((f) => f.startsWith('sender-key-') && !f.startsWith('sender-key-memory-'))).slice(0, 90);
+    const chatSessions = sortNewest(filenames.filter((f) => f.startsWith('session-'))).slice(0, 90);
+    const identityKeys = sortNewest(filenames.filter((f) => f.startsWith('identity-'))).slice(0, 50);
 
     return new Set([
         ...creds,
@@ -412,17 +494,33 @@ function scheduleSessionBackup(session) {
 
 async function backupAllValidSessionsToMongo(forceWait = false) {
     if (!MONGODB_URI || sessions.size === 0) return 0;
-    const tasks = [];
+    const list = [];
     for (const s of sessions.values()) {
         if (!s?.authDir) continue;
         if (s.backupDebounceTimer) {
             clearTimeout(s.backupDebounceTimer);
             s.backupDebounceTimer = null;
         }
-        tasks.push(executeSessionCloudBackup(s, forceWait).catch(() => false));
+        list.push(s);
     }
-    const results = await Promise.allSettled(tasks);
-    return results.filter((r) => r.status === 'fulfilled' && r.value).length;
+    let okCount = 0;
+    if (forceWait) {
+        // Shutdown path: flush in small batches of 4 so shutdown completes within 8s without 40x memory spike
+        for (let i = 0; i < list.length; i += 4) {
+            const batch = list.slice(i, i + 4);
+            const res = await Promise.allSettled(batch.map((s) => executeSessionCloudBackup(s, true).catch(() => false)));
+            okCount += res.filter((r) => r.status === 'fulfilled' && r.value).length;
+        }
+        return okCount;
+    }
+    // Periodic background path: strict 1-at-a-time sequential sync keeps peak RSS flat across 40 sessions
+    for (const s of list) {
+        if (isServerShuttingDown) break;
+        const ok = await executeSessionCloudBackup(s, false).catch(() => false);
+        if (ok) okCount++;
+        await sleep(100);
+    }
+    return okCount;
 }
 
 async function restoreAllSessionsFromCloud() {
@@ -431,7 +529,7 @@ async function restoreAllSessionsFromCloud() {
         if (!db) return [];
 
         const workerId = tenantManager.getWorkerId();
-        const docs = await db.collection('mini_bot_auth')
+        const cursor = db.collection('mini_bot_auth')
             .find({
                 $or: [
                     { _id: 'primary_session' },
@@ -439,11 +537,10 @@ async function restoreAllSessionsFromCloud() {
                     { workerId: { $exists: false } }
                 ]
             })
-            .limit(tenantManager.MAX_SESSIONS)
-            .toArray();
+            .limit(tenantManager.MAX_SESSIONS);
 
         const restoredKeys = [];
-        for (const doc of docs) {
+        for await (const doc of cursor) {
             if (!doc?.data) continue;
             try {
                 let buffer;
@@ -522,6 +619,8 @@ function cleanupSessionSocket(session) {
         try { session.sock.ws?.socket?.terminate?.(); } catch (_) {}
         session.sock = null;
     }
+    try { session.signalKeyCache?.flushAll?.(); } catch (_) {}
+    try { session.clearAuthLocks?.(); } catch (_) {}
 }
 
 async function destroySessionCompletely(sessionKey) {
@@ -685,8 +784,8 @@ async function handleIncomingForSession(session, msg) {
             capMap(antideleteCache, `${session.id}:${msgId}`, {
                 chat: from,
                 sender: msg.key.participant?.split('@')[0] || from.split('@')[0],
-                text: rawText
-            }, 150);
+                text: String(rawText).slice(0, 1500)
+            }, 80);
         }
 
         if (!match && !hasLinkViolation) return;
@@ -849,9 +948,10 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
         cleanupSessionSocket(session);
         await fs.ensureDir(session.authDir);
 
-        const { state, saveCreds } = await useMultiFileAuthState(session.authDir);
-        const boundedSignalCache = new BoundedSignalCache(400, 180000);
-        const sessionRetryCache = new BoundedSignalCache(400, 180000);
+        const { state, saveCreds, clearLocks } = await useLeanFileAuthState(session.authDir);
+        const boundedSignalCache = new BoundedSignalCache(75, 75000);
+        session.signalKeyCache = boundedSignalCache;
+        session.clearAuthLocks = clearLocks;
 
         const originalKeysSet = state.keys.set;
         state.keys.set = async (data) => {
@@ -882,21 +982,23 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
             syncFullHistory: false,
             shouldSyncHistoryMessage: () => false,
             markOnlineOnConnect: false,
-            keepAliveIntervalMs: 20000,
+            fireInitQueries: false,
+            enableRecentMessageCache: false,
+            keepAliveIntervalMs: 25000,
             connectTimeoutMs: 25000,
             defaultQueryTimeoutMs: 20000,
             emitOwnEvents: true,
             retryRequestDelayMs: 600,
-            maxMsgRetryCount: 5,
-            msgRetryCounterCache: sessionRetryCache,
+            maxMsgRetryCount: 4,
+            msgRetryCounterCache: sharedRetryCache,
+            userDevicesCache: sharedUserDevicesCache,
+            placeholderResendCache: sharedPlaceholderCache,
+            callOfferCache: sharedCallOfferCache,
             generateHighQualityLinkPreview: false,
             cachedGroupMetadata: async (jid) => getCachedGroupMeta(session.sock, jid),
             getMessage: async (key) => {
                 if (!key || key.remoteJid?.endsWith('@newsletter')) return undefined;
                 if (key.id && messageStore.has(key.id)) return messageStore.get(key.id);
-                if (key.remoteJid && key.id && messageStore.has(`${key.remoteJid}:${key.id}`)) {
-                    return messageStore.get(`${key.remoteJid}:${key.id}`);
-                }
                 return undefined;
             },
             patchMessageBeforeSending: (message) => {
@@ -1328,10 +1430,14 @@ setInterval(() => {
     const open = getOpenSockets();
     if (open.length) clusterMesh.syncAllNewsletterSubscriptions(open).catch(() => {});
 }, 120 * 1000).unref?.();
+let gcTickCount = 0;
 setInterval(() => {
     trimCaches();
-    if (typeof global.gc === 'function') global.gc();
-}, 180 * 1000).unref?.();
+    gcTickCount++;
+    if (typeof global.gc === 'function' && (gcTickCount % 2 === 0 || getMemoryUsageMb() >= 240)) {
+        global.gc();
+    }
+}, 60 * 1000).unref?.();
 setInterval(() => {
     if (!isServerShuttingDown) backupAllValidSessionsToMongo(false).catch(() => {});
 }, 15 * 60 * 1000).unref?.();
@@ -1846,7 +1952,7 @@ app.listen(PORT, async () => {
             if (isRegisteredCredsJson(raw)) validKeys.push(dirName);
         }
 
-        // Boot master owner sessions first, staggered cleanly by 450ms to keep RSS flat
+        // Boot master owner sessions first, staggered cleanly by 550ms + periodic GC to keep RSS flat across 40 sessions
         validKeys.sort((a, b) => (masterSet.has(a) === masterSet.has(b) ? a.localeCompare(b) : (masterSet.has(a) ? -1 : 1)));
         let booted = 0;
         for (const key of validKeys.slice(0, tenantManager.MAX_SESSIONS)) {
@@ -1855,17 +1961,20 @@ app.listen(PORT, async () => {
                 console.warn(`⚠️ [RAM Guard] Stopping boot restore at ${booted} sessions (${getMemoryUsageMb()}MB).`);
                 break;
             }
-            if (booted > 0) await sleep(450);
+            if (booted > 0) await sleep(550);
             booted++;
             initSession(key, null, { isFreshPairing: false }).catch((err) => {
                 console.error(`❌ [Auto-Connect ${key}]:`, err.message);
             });
+            if (booted % 8 === 0 && typeof global.gc === 'function') global.gc();
         }
         if (booted === 0) {
             console.log('ℹ️ [Auth] No registered sessions yet. Ready to accept pairs.');
         }
     } finally {
         startupRestoreInProgress = false;
+        trimCaches();
+        if (typeof global.gc === 'function') global.gc();
     }
 });
 

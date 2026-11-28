@@ -40,7 +40,7 @@ function getTtlCached(key) {
 }
 
 function setTtlCached(key, val, ttlMs = 300000) {
-    if (ttlCache.size >= 200) {
+    if (ttlCache.size >= 100) {
         const oldest = ttlCache.keys().next().value;
         ttlCache.delete(oldest);
     }

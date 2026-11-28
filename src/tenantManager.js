@@ -111,8 +111,12 @@ function scheduleSessionMetaDiskSave() {
 loadSessionMetaDisk();
 
 function getWorkerId() {
-    const explicit = (process.env.WORKER_ID || process.env.HEROKU_APP_NAME || '').trim();
-    if (explicit) return explicit.slice(0, 48);
+    const explicitWorker = (process.env.WORKER_ID || '').trim();
+    if (explicitWorker) return explicitWorker.slice(0, 48);
+
+    const herokuApp = (process.env.HEROKU_APP_NAME || '').trim();
+    if (herokuApp === 'sigmaminibot-8fdafb0f00ef') return 'mini-1';
+    if (herokuApp) return herokuApp.slice(0, 48);
 
     let urlCandidate = (process.env.APP_URL || '').trim();
     if (!urlCandidate) {
@@ -128,6 +132,7 @@ function getWorkerId() {
             .split('.')[0]
             .replace(/[^a-zA-Z0-9_-]/g, '')
             .trim();
+        if (hostSlug === 'sigmaminibot-8fdafb0f00ef') return 'mini-1';
         if (hostSlug) return hostSlug.slice(0, 48);
     }
     return 'mini-1';

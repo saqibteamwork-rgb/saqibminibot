@@ -529,11 +529,14 @@ async function restoreAllSessionsFromCloud() {
         if (!db) return [];
 
         const workerId = tenantManager.getWorkerId();
+        const workerIdMatches = workerId === 'mini-1'
+            ? ['mini-1', 'sigmaminibot-8fdafb0f00ef']
+            : [workerId];
         const cursor = db.collection('mini_bot_auth')
             .find({
                 $or: [
                     { _id: 'primary_session' },
-                    { workerId },
+                    { workerId: { $in: workerIdMatches } },
                     { workerId: { $exists: false } }
                 ]
             })

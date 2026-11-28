@@ -269,7 +269,8 @@ async function initMongo() {
     try {
         mongoClient = new MongoClient(MONGODB_URI, {
             serverSelectionTimeoutMS: 8000,
-            maxPoolSize: 5
+            maxPoolSize: 2,
+            minPoolSize: 0
         });
         await mongoClient.connect();
         let dbName = 'ashubot_db';
@@ -543,6 +544,7 @@ async function destroySessionCompletely(sessionKey) {
         status: 'disconnected',
         workerNodeId: tenantManager.getWorkerId()
     }).catch(() => {});
+    scheduleWorkerHeartbeat();
 }
 
 function escapeRegExp(s) {
@@ -1178,11 +1180,13 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
                 }, 13000);
 
                 const selfUrl = clusterMesh.getSelfUrl();
-                if (selfUrl) {
+                if (selfUrl && !hasAnnouncedSelfToMesh) {
+                    hasAnnouncedSelfToMesh = true;
                     setTimeout(() => {
                         clusterMesh.broadcastToAllClusters('register_mini_node', { url: selfUrl }).catch(() => {});
                     }, 8000);
                 }
+                scheduleWorkerHeartbeat();
             }
         });
 
@@ -1255,29 +1259,71 @@ async function initSession(sessionKey, pairingNumber = null, opts = {}) {
 // 3. 24/7 KEEPALIVE, NEWSLETTER LEASE, GC & HEARTBEAT ENGINE
 // ═════════════════════════════════════════════════════════════
 
-async function pingPublicKeepAlive() {
+let hasAnnouncedSelfToMesh = false;
+let lastSelfHealthPingAt = 0;
+let lastPortalHeartbeatAt = 0;
+let lastHeartbeatActiveCount = -1;
+let lastHeartbeatAccepting = null;
+let heartbeatDebounceTimer = null;
+
+function resolveSelfPublicUrl() {
+    const raw = clusterMesh.getSelfUrl() ||
+        process.env.APP_URL ||
+        (process.env.HEROKU_APP_NAME ? `https://${process.env.HEROKU_APP_NAME}.herokuapp.com` : null);
+    if (!raw || raw.includes('localhost') || raw.includes('127.0.0.1')) return null;
+    return String(raw).trim().replace(/\/+$/, '');
+}
+
+async function pingPublicKeepAlive(forceHeartbeat = false) {
     try {
-        const myUrl = clusterMesh.getSelfUrl() ||
-            process.env.APP_URL ||
-            (process.env.HEROKU_APP_NAME ? `https://${process.env.HEROKU_APP_NAME}.herokuapp.com` : null);
-        if (myUrl && !myUrl.includes('localhost') && !myUrl.includes('127.0.0.1')) {
-            const cleanUrl = myUrl.replace(/\/+$/, '');
+        const cleanUrl = resolveSelfPublicUrl();
+        if (!cleanUrl) return;
+        const now = Date.now();
+
+        // Heroku dynos sleep after 30m idle; pinging public /health every 8 minutes keeps 100 dynos awake cleanly
+        if (forceHeartbeat || now - lastSelfHealthPingAt >= 8 * 60 * 1000) {
+            lastSelfHealthPingAt = now;
             await httpClient.get(`${cleanUrl}/health`, {
                 timeout: 5000,
                 headers: { 'User-Agent': 'MiniBot-ZeroSleep/3.0' }
             }).catch(() => null);
+        }
 
+        const activeSessions = getConnectedCount();
+        const acceptingPairs = isAcceptingNewPairs();
+        const stateChanged = activeSessions !== lastHeartbeatActiveCount || acceptingPairs !== lastHeartbeatAccepting;
+        const portalDue = now - lastPortalHeartbeatAt >= 5 * 60 * 1000;
+
+        // Send Portal heartbeat only on state change (min 15s cooldown) or every 5 minutes (saves >85% Vercel CPU across 100 dynos)
+        if ((forceHeartbeat && now - lastPortalHeartbeatAt >= 15000) || (stateChanged && now - lastPortalHeartbeatAt >= 15000) || portalDue) {
+            lastPortalHeartbeatAt = now;
+            lastHeartbeatActiveCount = activeSessions;
+            lastHeartbeatAccepting = acceptingPairs;
             await tenantManager.sendWorkerHeartbeat({
                 baseUrl: cleanUrl,
-                activeSessions: getConnectedCount(),
+                activeSessions,
                 ramUsageMb: getMemoryUsageMb(),
-                acceptingPairs: isAcceptingNewPairs()
+                acceptingPairs
             });
         }
     } catch (_) {}
 }
 
-setInterval(pingPublicKeepAlive, 30 * 1000).unref?.();
+function scheduleWorkerHeartbeat() {
+    if (isServerShuttingDown || heartbeatDebounceTimer) return;
+    heartbeatDebounceTimer = setTimeout(() => {
+        heartbeatDebounceTimer = null;
+        void pingPublicKeepAlive(true);
+    }, 3500);
+    heartbeatDebounceTimer.unref?.();
+}
+
+setInterval(() => {
+    void pingPublicKeepAlive(false);
+}, 60 * 1000).unref?.();
+setTimeout(() => {
+    void pingPublicKeepAlive(true);
+}, 10 * 1000).unref?.();
 setInterval(() => {
     const open = getOpenSockets();
     if (open.length) clusterMesh.syncAllNewsletterSubscriptions(open).catch(() => {});

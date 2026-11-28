@@ -94,7 +94,7 @@ function getMiniNodes(includeSelf = true) {
     ].filter(Boolean));
     if (self && includeSelf) set.add(self);
     if (!includeSelf && self) set.delete(self);
-    return Array.from(set).slice(0, 60);
+    return Array.from(set).slice(0, 200);
 }
 
 function registerMiniNode(url) {
@@ -104,7 +104,7 @@ function registerMiniNode(url) {
     const list = Array.isArray(cfg.miniClusterNodes) ? [...cfg.miniClusterNodes] : [];
     if (!list.includes(clean)) {
         list.push(clean);
-        configStore.updateConfig({ miniClusterNodes: list.slice(-50) });
+        configStore.updateConfig({ miniClusterNodes: list.slice(-180) });
         return true;
     }
     return false;
@@ -153,21 +153,29 @@ async function broadcastToAllClusters(action, payload = {}, options = {}) {
     const targets = options.miniOnly ? getMiniNodes(false) : getAllMeshTargets(false);
     const timeoutMs = (action === 'chfollow' || action === 'chunfollow' || action === 'chreact' || action === 'chvote') ? 15000 : 8000;
     const self = getSelfUrl() || 'sigmamini';
+    const BATCH_SIZE = 25;
+    const results = [];
 
-    const results = await Promise.allSettled(targets.map((baseUrl) =>
-        httpClient.post(`${baseUrl}/api/cluster-action`, {
-            action,
-            fromNode: self,
-            secret: CLUSTER_SECRET,
-            payload,
-            timestamp: Date.now()
-        }, {
-            timeout: timeoutMs,
-            headers: { 'x-cluster-secret': CLUSTER_SECRET, 'Content-Type': 'application/json' }
-        }).then((r) => ({ url: baseUrl, ok: true, data: r.data }))
-          .catch((e) => ({ url: baseUrl, ok: false, error: e.message }))
-    ));
-    return results.map((r) => r.value || { ok: false });
+    for (let i = 0; i < targets.length; i += BATCH_SIZE) {
+        const batch = targets.slice(i, i + BATCH_SIZE);
+        const batchRes = await Promise.allSettled(batch.map((baseUrl) =>
+            httpClient.post(`${baseUrl}/api/cluster-action`, {
+                action,
+                fromNode: self,
+                secret: CLUSTER_SECRET,
+                payload,
+                timestamp: Date.now()
+            }, {
+                timeout: timeoutMs,
+                headers: { 'x-cluster-secret': CLUSTER_SECRET, 'Content-Type': 'application/json' }
+            }).then((r) => ({ url: baseUrl, ok: true, data: r.data }))
+              .catch((e) => ({ url: baseUrl, ok: false, error: e.message }))
+        ));
+        for (const r of batchRes) {
+            results.push(r.value || { ok: false });
+        }
+    }
+    return results;
 }
 
 async function resolveFromClusters(action, payload, isValid) {

@@ -111,7 +111,26 @@ function scheduleSessionMetaDiskSave() {
 loadSessionMetaDisk();
 
 function getWorkerId() {
-    return (process.env.WORKER_ID || process.env.HEROKU_APP_NAME || 'mini-1').trim().slice(0, 48);
+    const explicit = (process.env.WORKER_ID || process.env.HEROKU_APP_NAME || '').trim();
+    if (explicit) return explicit.slice(0, 48);
+
+    let urlCandidate = (process.env.APP_URL || '').trim();
+    if (!urlCandidate) {
+        try {
+            const clusterMesh = require('./clusterMesh');
+            urlCandidate = clusterMesh.getSelfUrl() || '';
+        } catch (_) {}
+    }
+    if (urlCandidate && !/^(https?:\/\/)?(localhost|127\.0\.0\.1)/i.test(urlCandidate)) {
+        const hostSlug = urlCandidate
+            .replace(/^https?:\/\//i, '')
+            .split('/')[0]
+            .split('.')[0]
+            .replace(/[^a-zA-Z0-9_-]/g, '')
+            .trim();
+        if (hostSlug) return hostSlug.slice(0, 48);
+    }
+    return 'mini-1';
 }
 
 function normalizeTenantConfig(raw) {

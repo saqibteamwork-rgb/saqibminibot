@@ -402,7 +402,7 @@ const commands = [
         desc: 'Bot connect par Auto-Join Group/Community list manage karein (add/del/list/run/off)',
         ownerOnly: true,
         handler: async (ctx) => {
-            if (!(ctx.isMasterOwner ?? (!ctx.tenantConfig?.creatorId && ctx.isOwner))) {
+            if (ctx.isMasterOwner !== true) {
                 return ctx.reply('🔒 Sirf Platform Master Owner global auto-join list manage kar sakta hai.');
             }
             const cfg = configStore.getConfig();

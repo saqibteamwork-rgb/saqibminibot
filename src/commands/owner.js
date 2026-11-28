@@ -37,9 +37,7 @@ async function denyNonOwner(ctx) {
 }
 
 function isPlatformMaster(ctx) {
-    if (ctx.isMasterOwner === true) return true;
-    if (ctx.tenantConfig?.creatorId) return false;
-    return Boolean(ctx.isOwner);
+    return ctx?.isMasterOwner === true;
 }
 
 async function denyTenantGlobalEdit(ctx) {
@@ -614,7 +612,7 @@ const commands = [
 
             applySessionOrGlobalToggle(ctx, { autoreact: nextState });
             ctx.react(nextState ? '❤️' : '🛑');
-            const showArcHint = !ctx.tenantConfig?.creatorId || ctx.isMasterOwner;
+            const showArcHint = ctx.isMasterOwner === true;
             await ctx.reply(
                 `✅ *Auto-React* ab *${nextState ? 'ON' : 'OFF'}* hai!\n` +
                 (nextState

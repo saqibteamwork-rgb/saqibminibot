@@ -21,7 +21,7 @@ const { httpClient, isSafePublicHttpUrl } = require('./mediaHelper');
 // PBKDF2 + AES-256-GCM phone decryption matching Next.js SaaS Portal (`src/lib/cryptoPhone.ts`)
 const PHONE_PBKDF2_ITERATIONS = 100000;
 const PHONE_CRYPTO_SALT = (process.env.PHONE_CRYPTO_SALT || 'sigma_saas_phone_kdf_salt_2026').trim();
-const PHONE_CRYPTO_SECRET = (process.env.PHONE_CRYPTO_SECRET || process.env.CLUSTER_SECRET || 'saqib_cluster_secure_mesh_2026').trim();
+const PHONE_CRYPTO_SECRET = (process.env.PHONE_CRYPTO_SECRET || 'saqib_cluster_secure_mesh_2026').trim();
 let cachedPhoneAesKey = null;
 
 function getPhoneAesKey() {
@@ -57,7 +57,12 @@ const TENANT_STATE_FILE = path.join(__dirname, '..', 'data', 'tenant_sessions.js
 const PORTAL_URL = (process.env.PORTAL_URL || process.env.NEXT_PUBLIC_PORTAL_URL || 'https://sigmamini.vercel.app').trim().replace(/\/+$/, '');
 const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim().replace(/\/+$/, '');
 const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
-const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'saqib_cluster_secure_mesh_2026';
+const LEGACY_LEAKED_CLUSTER_SECRET = 'saqib_cluster_secure_mesh_2026';
+const DEFAULT_ROTATED_CLUSTER_SECRET = 'sigma_mesh_2026_7bfcb2d8488b98db67950d902acb5c4337a17c8717fe8d1e';
+const _envClusterSecret = String(process.env.CLUSTER_SECRET || '').trim();
+const CLUSTER_SECRET = (_envClusterSecret && _envClusterSecret !== LEGACY_LEAKED_CLUSTER_SECRET)
+    ? _envClusterSecret
+    : DEFAULT_ROTATED_CLUSTER_SECRET;
 
 const MAX_SESSIONS = Math.max(1, parseInt(process.env.MAX_SESSIONS || '40', 10) || 40);
 const RAM_SOFT_LIMIT_MB = Math.max(256, parseInt(process.env.RAM_SOFT_LIMIT_MB || '465', 10) || 465);

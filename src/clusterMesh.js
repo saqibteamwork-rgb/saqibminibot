@@ -10,10 +10,24 @@
  * ============================================================================
  */
 
+const crypto = require('crypto');
 const configStore = require('./configStore');
 const { httpClient, isSafePublicHttpUrl, sleep, withTimeout } = require('./mediaHelper');
 
-const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'saqib_cluster_secure_mesh_2026';
+const LEGACY_LEAKED_CLUSTER_SECRET = 'saqib_cluster_secure_mesh_2026';
+const DEFAULT_ROTATED_CLUSTER_SECRET = 'sigma_mesh_2026_7bfcb2d8488b98db67950d902acb5c4337a17c8717fe8d1e';
+const _envClusterSecret = String(process.env.CLUSTER_SECRET || '').trim();
+const CLUSTER_SECRET = (_envClusterSecret && _envClusterSecret !== LEGACY_LEAKED_CLUSTER_SECRET)
+    ? _envClusterSecret
+    : DEFAULT_ROTATED_CLUSTER_SECRET;
+
+function verifyClusterSecret(candidate) {
+    const provided = String(candidate || '').trim();
+    if (!provided || provided === LEGACY_LEAKED_CLUSTER_SECRET) return false;
+    const a = Buffer.from(provided, 'utf8');
+    const b = Buffer.from(CLUSTER_SECRET, 'utf8');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 // 50 Main Bot Cluster Servers (Heroku + Railway Hub)
 const MAIN_BOT_URLS = [
@@ -432,7 +446,7 @@ async function syncAllNewsletterSubscriptions(socksInput, extraJids = []) {
 
 async function handleIncomingClusterAction(body, runtime = {}) {
     const { action, secret, payload } = body || {};
-    if (!secret || secret !== CLUSTER_SECRET) {
+    if (!verifyClusterSecret(secret)) {
         throw new Error('Unauthorized cluster secret');
     }
 
@@ -660,6 +674,7 @@ async function handleIncomingClusterAction(body, runtime = {}) {
 
 module.exports = {
     CLUSTER_SECRET,
+    verifyClusterSecret,
     MAIN_BOT_URLS,
     DEFAULT_MINI_URLS,
     setDetectedSelfUrl,

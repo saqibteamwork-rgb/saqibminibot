@@ -1567,7 +1567,7 @@ app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d'
 function verifyClusterRequest(req) {
     const body = req.body || {};
     const secret = String(body.secret || req.headers['x-cluster-secret'] || '');
-    return Boolean(secret && secret === clusterMesh.CLUSTER_SECRET);
+    return clusterMesh.verifyClusterSecret(secret);
 }
 
 app.post('/api/cluster-action', async (req, res) => {

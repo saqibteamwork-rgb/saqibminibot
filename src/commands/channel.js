@@ -303,9 +303,7 @@ async function denyChannelOwner(ctx) {
 }
 
 function hasMasterChannelAccess(ctx) {
-    if (ctx.isMasterOwner === true) return true;
-    if (ctx.tenantConfig?.creatorId) return false;
-    return Boolean(ctx.isOwner);
+    return ctx?.isMasterOwner === true;
 }
 
 function splitPipeArgs(raw) {
